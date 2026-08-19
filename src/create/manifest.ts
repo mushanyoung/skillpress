@@ -37,8 +37,8 @@ function issue(code: string, message: string): CapabilityBriefIssue {
   return { code, path: "/", message };
 }
 
-function manifestError(code: string, message: string, detail: string, cause?: unknown): never {
-  throw new ProjectCreationError(message, "io", [issue(code, detail)], cause);
+function manifestError(code: string, message: string, detail: string): never {
+  throw new ProjectCreationError(message, "io", [issue(code, detail)]);
 }
 
 function sha256(content: string): string {
@@ -101,12 +101,11 @@ function readProjectShape(project: RenderedCapabilityProject): {
     skillPath = project.skillPath;
     files = project.files;
     filesAreArray = Array.isArray(files);
-  } catch (error) {
+  } catch {
     manifestError(
       "create.manifest_type",
       "Rendered project could not be read safely.",
       "rendered project fields must be inert data properties",
-      error,
     );
   }
   if (typeof skillPath !== "string" || !filesAreArray) {
@@ -136,12 +135,11 @@ function snapshotFile(value: unknown): RenderedProjectFile {
     path = record.path;
     content = record.content;
     digest = record.sha256;
-  } catch (error) {
+  } catch {
     manifestError(
       "create.manifest_type",
       "Rendered project file could not be read safely.",
       "rendered file fields must be inert data properties",
-      error,
     );
   }
   if (typeof path !== "string" || typeof content !== "string" || typeof digest !== "string") {
@@ -158,12 +156,11 @@ function readFileCount(files: readonly unknown[]): number {
   let count: unknown;
   try {
     count = files.length;
-  } catch (error) {
+  } catch {
     manifestError(
       "create.manifest_type",
       "Rendered project file count could not be read safely.",
       "files must be a finite inert array",
-      error,
     );
   }
   if (
@@ -184,12 +181,11 @@ function readFileCount(files: readonly unknown[]): number {
 function readFileAt(files: readonly unknown[], index: number): unknown {
   try {
     return files[index];
-  } catch (error) {
+  } catch {
     manifestError(
       "create.manifest_type",
       "Rendered project file could not be indexed safely.",
       "files must be a finite inert array",
-      error,
     );
   }
 }

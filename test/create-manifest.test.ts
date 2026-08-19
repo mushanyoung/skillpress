@@ -296,6 +296,9 @@ describe("rendered project manifest snapshots", () => {
     expect(projectError.issues[0]?.message).not.toContain("secret");
     expect(fileError.issues[0]?.message).not.toContain("secret");
     expect(arrayError.issues[0]?.message).not.toContain("secret");
+    expect(projectError.cause).toBeUndefined();
+    expect(fileError.cause).toBeUndefined();
+    expect(arrayError.cause).toBeUndefined();
   });
 
   it("normalizes an accessor that throws a hostile proxy", () => {
@@ -317,7 +320,7 @@ describe("rendered project manifest snapshots", () => {
       },
     ) as RenderedCapabilityProject;
 
-    expectManifestIssue(hostile, "create.manifest_type");
+    expect(expectManifestIssue(hostile, "create.manifest_type").cause).toBeUndefined();
   });
 
   it("does not trust a caller-forged project creation error", () => {
@@ -335,6 +338,7 @@ describe("rendered project manifest snapshots", () => {
     expect(error).not.toBe(forged);
     expect(error.message).not.toContain("attacker");
     expect(error.issues).not.toContainEqual(expect.objectContaining({ code: "evil" }));
+    expect(error.cause).toBeUndefined();
   });
 
   it("does not replay a previously issued and mutated manifest error", () => {
@@ -358,5 +362,6 @@ describe("rendered project manifest snapshots", () => {
     expect(error).not.toBe(prior);
     expect(error.message).not.toContain("attacker");
     expect(error.issues).not.toContainEqual(expect.objectContaining({ code: "evil" }));
+    expect(error.cause).toBeUndefined();
   });
 });
