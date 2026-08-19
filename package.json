@@ -1,0 +1,56 @@
+{
+  "name": "@mushanyoung/skillpress",
+  "version": "0.1.0",
+  "description": "Build, evaluate, package, and publish production-grade Agent Skills.",
+  "license": "MIT",
+  "author": "Mushan Yang <mushanyoung@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mushanyoung/skillpress.git"
+  },
+  "homepage": "https://github.com/mushanyoung/skillpress#readme",
+  "bugs": {
+    "url": "https://github.com/mushanyoung/skillpress/issues"
+  },
+  "keywords": [
+    "agent-skills",
+    "cli",
+    "evals",
+    "skills",
+    "tessl"
+  ],
+  "type": "module",
+  "bin": {
+    "skillpress": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "npm run typecheck && npm test",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}

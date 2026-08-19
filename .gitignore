@@ -1,0 +1,18 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+
+# SkillPress keeps raw evaluation material private and out of source control.
+.skillpress/runs/
+.skillpress/staging/
+.skillpress/tmp/
+
+# Local credentials and environment overrides are never package inputs.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+.DS_Store
