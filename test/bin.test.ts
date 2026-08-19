@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { existsSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -6,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { VERSION } from "../src/version.js";
 
 const binPath = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
+const staleBuildPath = fileURLToPath(new URL("../dist/stale-build-output.js", import.meta.url));
 
 function invokeBin(...args: readonly string[]): {
   readonly status: number | null;
@@ -52,5 +54,24 @@ describe("compiled SkillPress binary", () => {
     expect(result.status).toBe(2);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("Unknown command: create");
+  });
+
+  it("removes stale output before rebuilding", () => {
+    writeFileSync(staleBuildPath, "stale\n", { encoding: "utf8", mode: 0o600 });
+    const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+    const result = spawnSync(npm, ["run", "build"], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      encoding: "utf8",
+      env: process.env,
+      timeout: 30_000,
+    });
+
+    if (result.error !== undefined) {
+      throw result.error;
+    }
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(staleBuildPath)).toBe(false);
+    expect(existsSync(binPath)).toBe(true);
   });
 });

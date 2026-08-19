@@ -29,10 +29,7 @@ export function renderHelp(): string {
   return HELP;
 }
 
-export async function runCli(
-  args: readonly string[],
-  io: CliIo = defaultIo,
-): Promise<number> {
+export async function runCli(args: readonly string[], io: CliIo = defaultIo): Promise<number> {
   if (args.length === 0 || args[0] === "--help" || args[0] === "-h" || args[0] === "help") {
     io.stdout(renderHelp());
     return 0;

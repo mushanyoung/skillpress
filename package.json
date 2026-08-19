@@ -42,14 +42,21 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "clean": "node scripts/clean.mjs",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
     "test": "npm run build && vitest run",
+    "test:coverage": "npm run build && vitest run --coverage",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "check": "npm run typecheck && npm test",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage",
     "prepack": "npm run build"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.9",
     "@types/node": "22.20.1",
+    "@vitest/coverage-v8": "4.1.11",
     "typescript": "7.0.2",
     "vitest": "4.1.11"
   }
