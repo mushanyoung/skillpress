@@ -1,0 +1,46 @@
+schemaVersion: 1
+project:
+  name: example-skill
+  version: 1.2.3
+  description: A complete example project used to verify SkillPress configuration loading.
+  license: MIT
+  repository: https://github.com/example/example-skill
+  author:
+    name: Example Author
+    github: example
+skill:
+  name: example-skill
+  path: skills/example-skill
+  risk: moderate
+quality:
+  readinessMinimum: 90
+  tesslQualityMinimum: 90
+  tesslImpactMinimum: 90
+  evidenceMaxAgeHours: 168
+tests:
+  commands:
+    - name: repository tests
+      argv: [npm, test]
+      timeoutSeconds: 300
+evaluation:
+  repetitions: 3
+  minimumSuccessRate: 0.9
+  minimumImpactDelta: 0.1
+  sandbox: docker
+  network: restricted
+improve:
+  maxIterations: 5
+  maxNoImprovement: 2
+  maxTokens: 200000
+  maxCostUsd: 100
+  maxWallMinutes: 240
+publish:
+  targets:
+    - github
+    - npm
+    - tessl
+    - skills-sh
+    - askill-sh
+    - agentskillhub-dev
+    - agent-skills-hub-catalog
+    - clawhub

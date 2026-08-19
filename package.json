@@ -31,6 +31,7 @@
   },
   "files": [
     "dist/",
+    "schemas/",
     "LICENSE",
     "README.md"
   ],
@@ -46,18 +47,25 @@
     "clean": "node scripts/clean.mjs",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "lint": "biome lint .",
+    "generate:config-types": "node scripts/generate-config-types.mjs",
+    "check:generated": "node scripts/generate-config-types.mjs --check",
+    "lint": "biome lint --error-on-warnings .",
     "test": "npm run build && vitest run",
     "test:coverage": "npm run build && vitest run --coverage",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage",
+    "check": "npm run format:check && npm run lint && npm run check:generated && npm run typecheck && npm run test:coverage",
     "prepack": "npm run build"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.9",
     "@types/node": "22.20.1",
     "@vitest/coverage-v8": "4.1.11",
+    "json-schema-to-typescript": "15.0.4",
     "typescript": "7.0.2",
     "vitest": "4.1.11"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "yaml": "2.9.0"
   }
 }
