@@ -1,0 +1,447 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/mushanyoung/skillpress/main/schemas/capability-brief.schema.json",
+  "title": "SkillPressCapabilityBrief",
+  "description": "A complete, testable capability brief from which SkillPress renders one canonical Agent Skill.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "name",
+    "title",
+    "summary",
+    "repository",
+    "author",
+    "license",
+    "risk",
+    "execution",
+    "capability",
+    "tests",
+    "publish",
+    "scenarios"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "name": {
+      "$ref": "#/definitions/name"
+    },
+    "title": {
+      "$ref": "#/definitions/shortLine"
+    },
+    "version": {
+      "description": "Project version used when rendering skillpress.yaml; defaults to 0.1.0 without mutating the input document.",
+      "default": "0.1.0",
+      "allOf": [{ "$ref": "#/definitions/semver" }]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 280,
+      "pattern": "^[^<>\\u0000-\\u001F\\u007F-\\u009F]+$"
+    },
+    "repository": {
+      "type": "string",
+      "maxLength": 240,
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$"
+    },
+    "author": {
+      "$ref": "#/definitions/author"
+    },
+    "license": {
+      "$ref": "#/definitions/license"
+    },
+    "risk": {
+      "type": "string",
+      "enum": ["low", "moderate", "high"]
+    },
+    "execution": {
+      "$ref": "#/definitions/execution"
+    },
+    "capability": {
+      "$ref": "#/definitions/capability"
+    },
+    "tests": {
+      "$ref": "#/definitions/tests"
+    },
+    "publish": {
+      "$ref": "#/definitions/publish"
+    },
+    "scenarios": {
+      "$ref": "#/definitions/scenarios"
+    }
+  },
+  "definitions": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "shortLine": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+    },
+    "line": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 500,
+      "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+    },
+    "scenarioText": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 2000,
+      "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+    },
+    "semver": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "author": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "github"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        },
+        "github": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 39,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$"
+        }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9.+-]*$"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 50,
+          "maxLength": 32768,
+          "pattern": "^(?![\\s\\S]*[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F])[\\s\\S]*$"
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sandbox", "network"],
+      "properties": {
+        "sandbox": {
+          "type": "string",
+          "enum": ["docker", "podman"]
+        },
+        "network": {
+          "type": "string",
+          "enum": ["none", "restricted"]
+        }
+      }
+    },
+    "namedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "required", "description"],
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/identifier"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "description": {
+          "$ref": "#/definitions/line"
+        }
+      }
+    },
+    "namedOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description"],
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/identifier"
+        },
+        "description": {
+          "$ref": "#/definitions/line"
+        }
+      }
+    },
+    "workflowStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "verification"],
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/line"
+        },
+        "verification": {
+          "$ref": "#/definitions/line"
+        }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "useWhen",
+        "doNotUseWhen",
+        "inputs",
+        "outputs",
+        "workflow",
+        "constraints",
+        "stopConditions"
+      ],
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 500,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        },
+        "useWhen": {
+          "$ref": "#/definitions/lineList"
+        },
+        "doNotUseWhen": {
+          "$ref": "#/definitions/lineList"
+        },
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/definitions/namedInput"
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/definitions/namedOutput"
+          }
+        },
+        "workflow": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/definitions/workflowStep"
+          }
+        },
+        "constraints": {
+          "$ref": "#/definitions/lineList"
+        },
+        "stopConditions": {
+          "$ref": "#/definitions/lineList"
+        }
+      }
+    },
+    "lineList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/definitions/line"
+      }
+    },
+    "testCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "argv", "timeoutSeconds"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._ -]*$"
+        },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          }
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "pattern": "^(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commands"],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/definitions/testCommand"
+          }
+        }
+      }
+    },
+    "publish": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targets"],
+      "properties": {
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "github",
+              "npm",
+              "tessl",
+              "skills-sh",
+              "askill-sh",
+              "agentskillhub-dev",
+              "agent-skills-hub-catalog",
+              "clawhub"
+            ]
+          }
+        }
+      }
+    },
+    "scenarioCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "prompt", "expectedBehavior"],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "prompt": {
+          "$ref": "#/definitions/scenarioText"
+        },
+        "expectedBehavior": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/definitions/line"
+          }
+        },
+        "forbiddenBehavior": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/definitions/line"
+          }
+        }
+      }
+    },
+    "scenarioList": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/definitions/scenarioCase"
+      }
+    },
+    "trainingScenarios": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["positive", "nearMiss", "failure", "adversarial"],
+      "properties": {
+        "positive": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "items": { "$ref": "#/definitions/scenarioCase" }
+        },
+        "nearMiss": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "items": { "$ref": "#/definitions/scenarioCase" }
+        },
+        "failure": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/definitions/scenarioCase" }
+        },
+        "adversarial": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/definitions/scenarioCase" }
+        }
+      }
+    },
+    "holdoutScenarios": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["positive", "nearMiss"],
+      "properties": {
+        "positive": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/definitions/scenarioCase" }
+        },
+        "nearMiss": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/definitions/scenarioCase" }
+        }
+      }
+    },
+    "scenarios": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["training", "holdout"],
+      "properties": {
+        "training": {
+          "$ref": "#/definitions/trainingScenarios"
+        },
+        "holdout": {
+          "$ref": "#/definitions/holdoutScenarios"
+        }
+      }
+    }
+  }
+}

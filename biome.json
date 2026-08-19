@@ -6,7 +6,12 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!!package-lock.json", "!!src/config/generated.ts"]
+    "includes": [
+      "**",
+      "!!package-lock.json",
+      "!!src/config/generated.ts",
+      "!!src/create/generated.ts"
+    ]
   },
   "formatter": {
     "enabled": true,

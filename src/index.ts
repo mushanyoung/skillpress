@@ -4,4 +4,11 @@ export { CONFIG_FILE_NAME, loadProjectConfig, MAX_CONFIG_BYTES } from "./config/
 export { ProjectConfigError } from "./config/errors.js";
 export type { ConfigIssue } from "./config/errors.js";
 export type { SkillPressProject } from "./config/generated.js";
+export { CapabilityBriefError } from "./create/errors.js";
+export type { CapabilityBriefIssue } from "./create/errors.js";
+export type { SkillPressCapabilityBrief } from "./create/generated.js";
+export { loadCapabilityBrief } from "./create/load.js";
+export type { ResolvedCapabilityBrief } from "./create/load.js";
+export { renderCapabilityProject } from "./create/render.js";
+export type { RenderedCapabilityProject, RenderedProjectFile } from "./create/render.js";
 export { VERSION } from "./version.js";

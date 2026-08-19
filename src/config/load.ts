@@ -267,6 +267,16 @@ function parseConfig(text: string): unknown {
   }
 }
 
+export async function loadStrictYamlDocument(path: string): Promise<unknown> {
+  const inspected = await inspectPath(path);
+  if (!inspected.metadata.isFile()) {
+    throw new ProjectConfigError("YAML input must be a regular file.", [
+      issue("config.file_type", "/", "YAML input path is not a regular file"),
+    ]);
+  }
+  return parseConfig(await readConfigText(inspected));
+}
+
 export async function loadProjectConfig(path: string = process.cwd()): Promise<SkillPressProject> {
   const config = await resolveConfigPath(path);
   const value = parseConfig(await readConfigText(config));
