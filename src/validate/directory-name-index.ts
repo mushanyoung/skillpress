@@ -114,13 +114,16 @@ export type DirectoryNameIndexReprofileResult =
 
 // Module initialization is the trust boundary for the intrinsics below.
 const applySnapshot = Reflect.apply;
+const arrayRef = Array;
 const arrayIsArraySnapshot = Array.isArray;
 const arraySortSnapshot = Array.prototype.sort;
 const charCodeAtSnapshot = String.prototype.charCodeAt;
 const definePropertySnapshot = Object.defineProperty;
 const freezeSnapshot = Object.freeze;
 const getOwnPropertyDescriptorSnapshot = Object.getOwnPropertyDescriptor;
+const numberRef = Number;
 const numberIsSafeIntegerSnapshot = Number.isSafeInteger;
+const objectRef = Object;
 const objectIsSnapshot = Object.is;
 const profileObservedResourceNameSnapshot = profileObservedResourceName;
 const isResourceNameProfileResultSnapshot = isResourceNameProfileResult;
@@ -184,14 +187,15 @@ function applyIntrinsic<T>(
 }
 
 function isArray(value: unknown): value is unknown[] {
-  return applyIntrinsic<boolean>(arrayIsArraySnapshot, Array, [value]);
+  return applyIntrinsic<boolean>(arrayIsArraySnapshot, arrayRef, [value]);
 }
 
 function getOwnDescriptor(value: object, property: PropertyKey): PropertyDescriptor | undefined {
-  return applyIntrinsic<PropertyDescriptor | undefined>(getOwnPropertyDescriptorSnapshot, Object, [
-    value,
-    property,
-  ]);
+  return applyIntrinsic<PropertyDescriptor | undefined>(
+    getOwnPropertyDescriptorSnapshot,
+    objectRef,
+    [value, property],
+  );
 }
 
 function indexProperty(index: number): string {
@@ -199,7 +203,7 @@ function indexProperty(index: number): string {
 }
 
 function appendOwnDataSlot<T>(values: T[], value: T): void {
-  applyIntrinsic<T[]>(definePropertySnapshot, Object, [
+  applyIntrinsic<T[]>(definePropertySnapshot, objectRef, [
     values,
     indexProperty(values.length),
     { __proto__: null, configurable: true, enumerable: true, value, writable: true },
@@ -207,11 +211,11 @@ function appendOwnDataSlot<T>(values: T[], value: T): void {
 }
 
 function isSafeInteger(value: unknown): value is number {
-  return applyIntrinsic<boolean>(numberIsSafeIntegerSnapshot, Number, [value]);
+  return applyIntrinsic<boolean>(numberIsSafeIntegerSnapshot, numberRef, [value]);
 }
 
 function isNegativeZero(value: number): boolean {
-  return applyIntrinsic<boolean>(objectIsSnapshot, Object, [value, -0]);
+  return applyIntrinsic<boolean>(objectIsSnapshot, objectRef, [value, -0]);
 }
 
 function codeUnitAt(value: string, index: number): number {

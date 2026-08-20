@@ -97,6 +97,7 @@ type ClosingHandleSnapshot = Readonly<{
 
 // Module initialization is the trust boundary for filesystem bindings and intrinsics.
 const applySnapshot = Reflect.apply;
+const objectRef = Object;
 const bufferFromSnapshot = Buffer.from;
 const bufferIsBufferSnapshot = Buffer.isBuffer;
 const definePropertySnapshot = Object.defineProperty;
@@ -227,7 +228,7 @@ function indexProperty(index: number): string {
 }
 
 function appendOwnDataSlot<T>(values: T[], value: T): void {
-  applyIntrinsic<T[]>(definePropertySnapshot, Object, [
+  applyIntrinsic<T[]>(definePropertySnapshot, objectRef, [
     values,
     indexProperty(values.length),
     { __proto__: null, configurable: true, enumerable: true, value, writable: true },
@@ -235,10 +236,11 @@ function appendOwnDataSlot<T>(values: T[], value: T): void {
 }
 
 function getOwnDescriptor(value: object, property: PropertyKey): PropertyDescriptor | undefined {
-  return applyIntrinsic<PropertyDescriptor | undefined>(getOwnPropertyDescriptorSnapshot, Object, [
-    value,
-    property,
-  ]);
+  return applyIntrinsic<PropertyDescriptor | undefined>(
+    getOwnPropertyDescriptorSnapshot,
+    objectRef,
+    [value, property],
+  );
 }
 
 function isBuffer(value: unknown): value is Buffer {

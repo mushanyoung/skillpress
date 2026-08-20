@@ -19,6 +19,7 @@ type LstatPath = ResourceTreeLstatIo["lstatPath"];
 
 // Module initialization is the trust boundary for filesystem bindings, producers, and intrinsics.
 const applySnapshot = Reflect.apply;
+const objectRef = Object;
 const freezeSnapshot = Object.freeze;
 const getOwnPropertyDescriptorSnapshot = Object.getOwnPropertyDescriptor;
 const lstatBuiltinSnapshot = lstat;
@@ -50,10 +51,11 @@ function applyIntrinsic<T>(
 }
 
 function getOwnDescriptor(value: object, property: PropertyKey): PropertyDescriptor | undefined {
-  return applyIntrinsic<PropertyDescriptor | undefined>(getOwnPropertyDescriptorSnapshot, Object, [
-    value,
-    property,
-  ]);
+  return applyIntrinsic<PropertyDescriptor | undefined>(
+    getOwnPropertyDescriptorSnapshot,
+    objectRef,
+    [value, property],
+  );
 }
 
 function sampleSignal(value: unknown): AbortSignalSample {

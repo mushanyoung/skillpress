@@ -48,6 +48,7 @@ export type MarkdownDestination =
 
 // Module initialization is the trust boundary for the intrinsics and producers below.
 const applySnapshot = Reflect.apply;
+const objectRef = Object;
 const bufferByteLengthSnapshot = Buffer.byteLength;
 const bufferConstructorSnapshot = Buffer;
 const decodeURIComponentSnapshot = decodeURIComponent;
@@ -97,7 +98,7 @@ function unambiguous(value: string): boolean {
 }
 
 function append<T>(values: T[], value: T): void {
-  applyIntrinsic<T[]>(definePropertySnapshot, Object, [
+  applyIntrinsic<T[]>(definePropertySnapshot, objectRef, [
     values,
     values.length,
     { __proto__: null, configurable: true, enumerable: true, value, writable: true },

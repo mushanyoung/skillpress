@@ -27,6 +27,7 @@ const MAX_COMPARISON_STRING_UNITS = 64 * 1024 * 1024;
 const MAX_INDEX_STRING_CODE_UNITS = 1_024;
 const INVALID = Symbol("invalid");
 const applySnapshot = Reflect.apply;
+const arrayRef = Array;
 const arrayIsArraySnapshot = Array.isArray;
 const arrayPrototypeSnapshot = Array.prototype;
 const bufferByteLengthSnapshot = Buffer.byteLength;
@@ -35,7 +36,9 @@ const definePropertySnapshot = Object.defineProperty;
 const getOwnPropertyDescriptorSnapshot = Object.getOwnPropertyDescriptor;
 const getPrototypeOfSnapshot = Object.getPrototypeOf;
 const isProxySnapshot = types.isProxy;
+const numberRef = Number;
 const numberIsSafeIntegerSnapshot = Number.isSafeInteger;
+const objectRef = Object;
 const objectIsSnapshot = Object.is;
 const objectPrototypeSnapshot = Object.prototype;
 const snapshotFileMetadataSnapshot = snapshotFileMetadata;
@@ -71,7 +74,7 @@ function append(state: State, value: Token): boolean {
     state.stringUnits += value.length;
     if (state.stringUnits > MAX_COMPARISON_STRING_UNITS) return false;
   }
-  applyIntrinsic(definePropertySnapshot, Object, [
+  applyIntrinsic(definePropertySnapshot, objectRef, [
     state.tokens,
     state.tokens.length,
     { __proto__: null, configurable: true, enumerable: true, value, writable: true },
@@ -85,7 +88,7 @@ function descriptorValue(
 ): unknown | typeof INVALID {
   const field = applyIntrinsic<PropertyDescriptor | undefined>(
     getOwnPropertyDescriptorSnapshot,
-    Object,
+    objectRef,
     [descriptor, key],
   );
   return field === undefined ? INVALID : field.value;
@@ -94,7 +97,7 @@ function descriptorValue(
 function data(value: object, key: PropertyKey): unknown | typeof INVALID {
   const descriptor = applyIntrinsic<PropertyDescriptor | undefined>(
     getOwnPropertyDescriptorSnapshot,
-    Object,
+    objectRef,
     [value, key],
   );
   if (descriptor === undefined || descriptorValue(descriptor, "value") === INVALID) {
@@ -110,8 +113,8 @@ function isProxy(value: object): boolean {
 function record(state: State, value: unknown, keys: readonly string[]): object | undefined {
   if (typeof value !== "object" || value === null || isProxy(value)) return undefined;
   if (
-    applyIntrinsic<boolean>(arrayIsArraySnapshot, Array, [value]) ||
-    applyIntrinsic(getPrototypeOfSnapshot, Object, [value]) !== objectPrototypeSnapshot ||
+    applyIntrinsic<boolean>(arrayIsArraySnapshot, arrayRef, [value]) ||
+    applyIntrinsic(getPrototypeOfSnapshot, objectRef, [value]) !== objectPrototypeSnapshot ||
     !spend(state, keys.length + 1)
   ) {
     return undefined;
@@ -130,8 +133,8 @@ function array(
 ): readonly unknown[] | undefined {
   if (typeof value !== "object" || value === null || isProxy(value)) return undefined;
   if (
-    !applyIntrinsic<boolean>(arrayIsArraySnapshot, Array, [value]) ||
-    applyIntrinsic(getPrototypeOfSnapshot, Object, [value]) !== arrayPrototypeSnapshot
+    !applyIntrinsic<boolean>(arrayIsArraySnapshot, arrayRef, [value]) ||
+    applyIntrinsic(getPrototypeOfSnapshot, objectRef, [value]) !== arrayPrototypeSnapshot
   ) {
     return undefined;
   }
@@ -147,8 +150,8 @@ function array(
 function safeNumber(value: unknown, minimum: number, maximum: number): value is number {
   return !(
     typeof value !== "number" ||
-    !applyIntrinsic<boolean>(numberIsSafeIntegerSnapshot, Number, [value]) ||
-    applyIntrinsic<boolean>(objectIsSnapshot, Object, [value, -0]) ||
+    !applyIntrinsic<boolean>(numberIsSafeIntegerSnapshot, numberRef, [value]) ||
+    applyIntrinsic<boolean>(objectIsSnapshot, objectRef, [value, -0]) ||
     value < minimum ||
     value > maximum
   );
@@ -196,7 +199,7 @@ function rootLayout(state: State, value: unknown): boolean {
   for (let index = 0; index < LAYOUT_KEYS.length; index += 1) {
     const expectedValue = expected[index] as Token;
     if (
-      !applyIntrinsic<boolean>(objectIsSnapshot, Object, [
+      !applyIntrinsic<boolean>(objectIsSnapshot, objectRef, [
         data(layout, LAYOUT_KEYS[index] as string),
         expectedValue,
       ]) ||

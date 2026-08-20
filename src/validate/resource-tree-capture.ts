@@ -100,6 +100,7 @@ type BoundedResult<T> = Readonly<{ ok: true; value: T }> | ResourceTreeCaptureFa
 
 // Module initialization is the trust boundary for native bindings, producers, and intrinsics.
 const applySnapshot = Reflect.apply;
+const objectRef = Object;
 const definePropertySnapshot = Object.defineProperty;
 const freezeSnapshot = Object.freeze;
 const getOwnPropertyDescriptorSnapshot = Object.getOwnPropertyDescriptor;
@@ -130,7 +131,7 @@ const DEFAULT_IO: ResourceTreeCaptureIo = freezeSnapshot({
  * This does not harden upstream promises, nested values, or native Promise machinery.
  */
 function freezeAsyncResult<T extends object>(value: T): Readonly<T> {
-  applyIntrinsic<object>(definePropertySnapshot, Object, [
+  applyIntrinsic<object>(definePropertySnapshot, objectRef, [
     value,
     "then",
     {
@@ -169,14 +170,15 @@ function applyIntrinsic<T>(
 }
 
 function getOwnDescriptor(value: object, property: PropertyKey): PropertyDescriptor | undefined {
-  return applyIntrinsic<PropertyDescriptor | undefined>(getOwnPropertyDescriptorSnapshot, Object, [
-    value,
-    property,
-  ]);
+  return applyIntrinsic<PropertyDescriptor | undefined>(
+    getOwnPropertyDescriptorSnapshot,
+    objectRef,
+    [value, property],
+  );
 }
 
 function appendOwnDataSlot<T>(values: T[], value: T): void {
-  applyIntrinsic<T[]>(definePropertySnapshot, Object, [
+  applyIntrinsic<T[]>(definePropertySnapshot, objectRef, [
     values,
     values.length,
     { __proto__: null, configurable: true, enumerable: true, value, writable: true },

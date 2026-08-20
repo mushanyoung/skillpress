@@ -4,6 +4,7 @@ export type AbortSignalSample = "absent" | "active" | "aborted" | "invalid";
 
 // Module initialization is the trust boundary for the prototype, sampler, and intrinsics below.
 const applySnapshot = Reflect.apply;
+const objectRef = Object;
 const getPrototypeOfSnapshot = Object.getPrototypeOf;
 const isProxySnapshot = types.isProxy;
 const signalPrototypeSnapshot = AbortSignal.prototype;
@@ -24,7 +25,7 @@ export function sampleAbortSignal(value: unknown): AbortSignalSample {
   if (abortedGetterSnapshot === undefined) return "invalid";
   try {
     if (applySnapshot(isProxySnapshot, undefined, [value]) === true) return "invalid";
-    if (applySnapshot(getPrototypeOfSnapshot, Object, [value]) !== signalPrototypeSnapshot) {
+    if (applySnapshot(getPrototypeOfSnapshot, objectRef, [value]) !== signalPrototypeSnapshot) {
       return "invalid";
     }
     const aborted = applySnapshot(abortedGetterSnapshot, value, []);

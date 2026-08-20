@@ -43,6 +43,9 @@ const DEFAULT_IO: RootInspectionIo = {
 };
 
 const applySnapshot = Reflect.apply;
+const objectRef = Object;
+const reflectRef = Reflect;
+const reflectGetSnapshot = Reflect.get;
 const definePropertySnapshot = Object.defineProperty;
 const freezeSnapshot = Object.freeze;
 const splitSnapshot = String.prototype.split;
@@ -56,7 +59,7 @@ function registerRootInspection(root: RootInspection): RootInspection {
 }
 
 function appendOwnDataSlot<T>(values: T[], value: T): void {
-  applySnapshot(definePropertySnapshot, Object, [
+  applySnapshot(definePropertySnapshot, objectRef, [
     values,
     values.length,
     { __proto__: null, configurable: true, enumerable: true, value, writable: true },
@@ -77,7 +80,11 @@ export function isGenuineRootInspection(value: unknown): value is RootInspection
 
 function isMissing(error: unknown): boolean {
   try {
-    return typeof error === "object" && error !== null && Reflect.get(error, "code") === "ENOENT";
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      applySnapshot(reflectGetSnapshot, reflectRef, [error, "code"]) === "ENOENT"
+    );
   } catch {
     return false;
   }
