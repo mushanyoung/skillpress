@@ -1,20 +1,21 @@
-import { writeFile } from "node:fs/promises";
+import fsPromisesModule, { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { types } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DiagnosticCollector } from "../src/validate/diagnostics.js";
-import type {
-  ResourceTreeCaptureFailureReason,
-  ResourceTreeCaptureIo,
-} from "../src/validate/resource-tree-capture.js";
+import type { ResourceTreeCaptureFailureReason } from "../src/validate/resource-tree-capture.js";
 import {
   isGenuineResourceTreeSession,
   openInspectedResourceTreeSession,
   resourceTreeSessionIsCurrent,
   type ResourceTreeSessionFailure,
 } from "../src/validate/resource-tree-session.js";
+import {
+  type ResourceTreeSessionIo,
+  snapshotResourceTreeSessionIo,
+} from "../src/validate/resource-tree-session-io.js";
 import { inspectAgentSkillDocument } from "../src/validate/skill-document.js";
 import type { DocumentInspection } from "../src/validate/skill-document-read.js";
 import { inspectAgentSkillRoot } from "../src/validate/skill-root.js";
@@ -25,6 +26,7 @@ const modulePaths = [
   "../src/validate/resource-tree-capture.js",
   "../src/validate/resource-tree-comparison.js",
   "../src/validate/skill-document.js",
+  "../src/validate/resource-tree-session-io.js",
 ] as const;
 
 afterEach(async () => {
@@ -108,7 +110,7 @@ type Comparison = "equal" | "different" | "invalid" | "throw";
 type MockState = {
   readonly document: object;
   readonly sourceIo: object;
-  readonly retainedIo: ResourceTreeCaptureIo;
+  readonly retainedIo: ResourceTreeSessionIo;
   readonly queue: QueueItem[];
   readonly captureCalls: Array<readonly [unknown, unknown, unknown]>;
   readonly captureReceivers: unknown[];
@@ -126,6 +128,8 @@ function mockState(queue: QueueItem[] = []): MockState {
       lstatPath: async () => ({}) as never,
       openDirectory: async () => ({}) as never,
       rootIsCurrent: async () => true,
+      openFile: async () => ({}) as never,
+      capabilities: Object.freeze({ noFollow: false, nonBlock: false }),
     }),
     queue,
     captureCalls: [],
@@ -145,7 +149,9 @@ async function mockedSession(state: MockState) {
       if (typeof next === "function") return next();
       return next;
     },
-    snapshotResourceTreeCaptureIo(value: unknown) {
+  }));
+  vi.doMock(modulePaths[3], () => ({
+    snapshotResourceTreeSessionIo(value: unknown) {
       state.snapshotValues.push(value);
       return state.retainedIo;
     },
@@ -233,7 +239,7 @@ describe("resource-tree sessions", () => {
     );
     expect(ioGetterCalls).toBe(0);
     let ioCalls = 0;
-    const validIo: ResourceTreeCaptureIo = {
+    const captureOnly = {
       lstatPath: async () => {
         ioCalls += 1;
         return {} as never;
@@ -247,6 +253,25 @@ describe("resource-tree sessions", () => {
         return true;
       },
     };
+    expectFailure(
+      await openInspectedResourceTreeSession(document, controller.signal, captureOnly),
+      "io",
+    );
+    const validIo: ResourceTreeSessionIo = {
+      ...captureOnly,
+      openFile: async () => {
+        ioCalls += 1;
+        return {} as never;
+      },
+      capabilities: Object.freeze({ noFollow: false, nonBlock: false }),
+    };
+    expectFailure(
+      await openInspectedResourceTreeSession(document, controller.signal, {
+        ...validIo,
+        capabilities: { noFollow: false } as never,
+      }),
+      "io",
+    );
     expectFailure(
       await openInspectedResourceTreeSession(document, controller.signal, validIo),
       "aborted",
@@ -309,12 +334,8 @@ describe("resource-tree sessions", () => {
       state.document,
       state.document,
     ]);
-    expect(state.captureCalls.map((call) => call[2])).toEqual([
-      state.retainedIo,
-      state.retainedIo,
-      state.retainedIo,
-      state.retainedIo,
-    ]);
+    expect(state.captureCalls).toHaveLength(4);
+    for (const call of state.captureCalls) expect(call[2]).toBe(state.retainedIo);
     expect(state.comparisons.slice(1)).toEqual([
       [second, freshOne],
       [second, freshTwo],
@@ -578,12 +599,42 @@ describe("resource-tree sessions", () => {
       expect(sessionModule.isGenuineResourceTreeSession(opened.session)).toBe(true);
     }
 
-    const rootSource = await import("node:fs/promises").then(({ readFile }) =>
-      readFile(new URL("../src/index.ts", import.meta.url), "utf8"),
+    const beforeIo = snapshotResourceTreeSessionIo();
+    if (beforeIo === undefined) throw new Error("expected default session IO");
+    const objectConstructor = Object;
+    const ioTargets = [
+      [Reflect, "apply"],
+      [Object, "freeze"],
+      [Object, "getOwnPropertyDescriptor"],
+      [fsPromisesModule, "open"],
+    ] as const;
+    const ioDescriptors = ioTargets.map(
+      ([target, key]) => [target, key, Reflect.getOwnPropertyDescriptor(target, key)] as const,
     );
+    let afterIo: ResourceTreeSessionIo | undefined;
+    try {
+      for (const [target, key, descriptor] of ioDescriptors) {
+        if (descriptor === undefined) throw new Error(`missing ${key}`);
+        Reflect.defineProperty(target, key, { ...descriptor, value: poison });
+      }
+      globalThis.Object = poison as unknown as ObjectConstructor;
+      afterIo = snapshotResourceTreeSessionIo();
+    } finally {
+      globalThis.Object = objectConstructor;
+      for (const [target, key, descriptor] of ioDescriptors) {
+        if (descriptor !== undefined) Reflect.defineProperty(target, key, descriptor);
+      }
+    }
+    expect(afterIo?.openFile).toBe(beforeIo.openFile);
+    expect(afterIo?.capabilities).toEqual(beforeIo.capabilities);
+    expect(poisonCalls).toBe(0);
+
+    const rootSource = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
     for (const name of [
       "ResourceTreeSession",
       "ResourceTreeSessionFailureReason",
+      "ResourceTreeSessionIo",
+      "snapshotResourceTreeSessionIo",
       "openInspectedResourceTreeSession",
       "isGenuineResourceTreeSession",
       "resourceTreeSessionIsCurrent",
@@ -591,9 +642,7 @@ describe("resource-tree sessions", () => {
       expect(rootSource).not.toContain(name);
     }
     const packageJson = JSON.parse(
-      await import("node:fs/promises").then(({ readFile }) =>
-        readFile(new URL("../package.json", import.meta.url), "utf8"),
-      ),
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
     ) as { exports: Record<string, unknown> };
     expect(Object.keys(packageJson.exports)).toEqual(["."]);
   });

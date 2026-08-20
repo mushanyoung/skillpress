@@ -6,11 +6,13 @@ import {
   type CapturedResourceTreeRoot,
   captureInspectedResourceTree,
   type ResourceTreeCaptureFailureReason,
-  type ResourceTreeCaptureIo,
   type ResourceTreeCaptureResult,
-  snapshotResourceTreeCaptureIo,
 } from "./resource-tree-capture.js";
 import { compareResourceTreeCaptureSemantics } from "./resource-tree-comparison.js";
+import {
+  type ResourceTreeSessionIo,
+  snapshotResourceTreeSessionIo,
+} from "./resource-tree-session-io.js";
 import { isGenuineDocumentInspection } from "./skill-document.js";
 import type { DocumentInspection } from "./skill-document-read.js";
 
@@ -44,7 +46,7 @@ type CaptureObservation =
   | ResourceTreeSessionFailure;
 type SessionContext = Readonly<{
   document: DocumentInspection;
-  io: ResourceTreeCaptureIo;
+  io: ResourceTreeSessionIo;
   baseline: CaptureSuccess;
 }>;
 
@@ -60,7 +62,7 @@ const weakMapSetSnapshot = WeakMap.prototype.set;
 const captureSnapshot = captureInspectedResourceTree;
 const compareSnapshot = compareResourceTreeCaptureSemantics;
 const documentPredicateSnapshot = isGenuineDocumentInspection;
-const ioSnapshot = snapshotResourceTreeCaptureIo;
+const ioSnapshot = snapshotResourceTreeSessionIo;
 const signalSnapshot = sampleAbortSignal;
 const sessionContexts = new WeakMap<object, SessionContext>();
 
@@ -185,7 +187,7 @@ function normalizeCapture(value: unknown): CaptureSuccess | ResourceTreeSessionF
 async function observeCapture(
   document: DocumentInspection,
   signal: unknown,
-  io: ResourceTreeCaptureIo,
+  io: ResourceTreeSessionIo,
 ): Promise<CaptureObservation> {
   let settled: unknown;
   let rejected = false;
@@ -240,9 +242,9 @@ export async function openInspectedResourceTreeSession(
   const document = documentValue as DocumentInspection;
   const initial = sample(signalValue);
   if (initial === "invalid") return INVALID_INPUT;
-  let io: ResourceTreeCaptureIo | undefined;
+  let io: ResourceTreeSessionIo | undefined;
   try {
-    io = applyIntrinsic<ResourceTreeCaptureIo | undefined>(ioSnapshot, undefined, [ioValue]);
+    io = applyIntrinsic<ResourceTreeSessionIo | undefined>(ioSnapshot, undefined, [ioValue]);
   } catch {
     return IO;
   }
