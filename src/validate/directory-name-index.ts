@@ -202,7 +202,7 @@ function appendOwnDataSlot<T>(values: T[], value: T): void {
   applyIntrinsic<T[]>(definePropertySnapshot, Object, [
     values,
     indexProperty(values.length),
-    { configurable: true, enumerable: true, value, writable: true },
+    { __proto__: null, configurable: true, enumerable: true, value, writable: true },
   ]);
 }
 
@@ -549,14 +549,15 @@ export function indexDirectoryNames(value: unknown): DirectoryNameIndexResult {
     let profile: unknown;
     try {
       const descriptor = getOwnDescriptor(value, indexProperty(index));
+      const valueDescriptor = descriptor && getOwnDescriptor(descriptor, "value");
       if (
         descriptor === undefined ||
-        descriptor.get !== undefined ||
-        descriptor.set !== undefined
+        // Only an own data value identifies a dense profile slot.
+        valueDescriptor === undefined
       ) {
         return INVALID_INPUT;
       }
-      profile = descriptor.value;
+      profile = valueDescriptor.value;
     } catch {
       return INVALID_INPUT;
     }

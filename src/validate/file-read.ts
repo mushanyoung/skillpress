@@ -128,7 +128,13 @@ function freezeAsyncResult<T extends object>(value: T): Readonly<T> {
   applySnapshot(definePropertySnapshot, objectConstructorSnapshot, [
     value,
     "then",
-    { configurable: false, enumerable: false, value: undefined, writable: false },
+    {
+      __proto__: null,
+      configurable: false,
+      enumerable: false,
+      value: undefined,
+      writable: false,
+    },
   ]);
   return applySnapshot(freezeSnapshot, objectConstructorSnapshot, [value]) as Readonly<T>;
 }

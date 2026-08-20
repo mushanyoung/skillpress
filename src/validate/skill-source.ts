@@ -67,7 +67,7 @@ function append<T>(values: T[], value: T): void {
   applyIntrinsic(definePropertySnapshot, objectConstructorSnapshot, [
     values,
     values.length,
-    { configurable: true, enumerable: true, value, writable: true },
+    { __proto__: null, configurable: true, enumerable: true, value, writable: true },
   ]);
 }
 

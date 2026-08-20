@@ -133,7 +133,13 @@ function freezeAsyncResult<T extends object>(value: T): Readonly<T> {
   applyIntrinsic<object>(definePropertySnapshot, Object, [
     value,
     "then",
-    { configurable: false, enumerable: false, value: undefined, writable: false },
+    {
+      __proto__: null,
+      configurable: false,
+      enumerable: false,
+      value: undefined,
+      writable: false,
+    },
   ]);
   return freezeSnapshot(value);
 }
@@ -173,7 +179,7 @@ function appendOwnDataSlot<T>(values: T[], value: T): void {
   applyIntrinsic<T[]>(definePropertySnapshot, Object, [
     values,
     values.length,
-    { configurable: true, enumerable: true, value, writable: true },
+    { __proto__: null, configurable: true, enumerable: true, value, writable: true },
   ]);
 }
 

@@ -124,6 +124,7 @@ function freezeBarrier<T extends object>(value: T): Readonly<T> {
     value,
     "then",
     {
+      __proto__: null,
       configurable: false,
       enumerable: false,
       value: undefined,

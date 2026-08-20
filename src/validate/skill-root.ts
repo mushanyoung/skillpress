@@ -59,7 +59,7 @@ function appendOwnDataSlot<T>(values: T[], value: T): void {
   applySnapshot(definePropertySnapshot, Object, [
     values,
     values.length,
-    { configurable: true, enumerable: true, value, writable: true },
+    { __proto__: null, configurable: true, enumerable: true, value, writable: true },
   ]);
 }
 

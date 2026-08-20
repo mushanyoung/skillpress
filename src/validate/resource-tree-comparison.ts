@@ -74,7 +74,7 @@ function append(state: State, value: Token): boolean {
   applyIntrinsic(definePropertySnapshot, Object, [
     state.tokens,
     state.tokens.length,
-    { configurable: true, enumerable: true, value, writable: true },
+    { __proto__: null, configurable: true, enumerable: true, value, writable: true },
   ]);
   return true;
 }

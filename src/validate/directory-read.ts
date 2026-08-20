@@ -230,7 +230,7 @@ function appendOwnDataSlot<T>(values: T[], value: T): void {
   applyIntrinsic<T[]>(definePropertySnapshot, Object, [
     values,
     indexProperty(values.length),
-    { configurable: true, enumerable: true, value, writable: true },
+    { __proto__: null, configurable: true, enumerable: true, value, writable: true },
   ]);
 }
 

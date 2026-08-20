@@ -161,7 +161,7 @@ function append<T>(values: T[], value: T): void {
   applyIntrinsic<T[]>(definePropertySnapshot, objectConstructorSnapshot, [
     values,
     values.length,
-    { configurable: true, enumerable: true, value, writable: true },
+    { __proto__: null, configurable: true, enumerable: true, value, writable: true },
   ]);
 }
 function genuineProfile(value: unknown): value is ResourceNameProfile {
