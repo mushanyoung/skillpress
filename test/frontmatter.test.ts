@@ -44,6 +44,20 @@ describe("strict Agent Skills frontmatter parsing", () => {
       entries: [{ key: "__proto__", value: "inert" }],
     });
     expect(result.parsed?.body).toContain("Do the work safely.");
+    expect(result.parsed).toMatchObject({ bodyStartLine: 10 });
+    expect(result.parsed?.bodyStartOffset).toBe(
+      skillDocument(
+        [
+          "name: portable-skill",
+          "description: A useful skill.",
+          "license: MIT",
+          "compatibility: Any Agent Skills client.",
+          "metadata:",
+          "  __proto__: inert",
+          "allowed-tools: Read Grep",
+        ].join("\n"),
+      ).indexOf("# Instructions"),
+    );
   });
 
   it("rejects unknown fields without reflecting their content", () => {
@@ -115,6 +129,18 @@ describe("strict Agent Skills frontmatter parsing", () => {
     expect(
       unknown.report.diagnostics.find((entry) => entry.code === "skill.frontmatter.unknown_field"),
     ).toMatchObject({ line: 4, column: 1 });
+  });
+
+  it("propagates exact body coordinates across CRLF and astral frontmatter", () => {
+    const text = '---\r\nname: astral\r\ndescription: "Valid 😀 text"\r\n---\r\n# Body\r\n';
+    const result = parse(text);
+    expect(result.report.diagnostics).toEqual([]);
+    expect(result.parsed).toMatchObject({
+      body: "# Body\r\n",
+      bodyStartLine: 5,
+      bodyStartOffset: text.indexOf("# Body"),
+    });
+    expect(text.slice(result.parsed?.bodyStartOffset)).toBe(result.parsed?.body);
   });
 
   it("rejects controls, noncharacters, and unpaired surrogates decoded from YAML", () => {

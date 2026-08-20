@@ -296,5 +296,10 @@ export function parseAgentSkillFrontmatter(
     (error) => error.code !== "NON_STRING_KEY" && error.code !== "DUPLICATE_KEY",
   );
   if (blocking || rejected) return undefined;
-  return { fields: fields(document.contents, diagnostics, counter), body: parts.body };
+  return {
+    fields: fields(document.contents, diagnostics, counter),
+    body: parts.body,
+    bodyStartLine: parts.bodyStartLine,
+    bodyStartOffset: parts.bodyStartOffset,
+  };
 }

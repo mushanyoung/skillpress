@@ -65,6 +65,10 @@ export interface ParsedFrontmatterField {
 export interface ParsedAgentSkillFrontmatter {
   readonly fields: ReadonlyMap<string, ParsedFrontmatterField>;
   readonly body: string;
+  /** One-based SKILL.md line containing the first body character. */
+  readonly bodyStartLine: number;
+  /** UTF-16 code-unit offset of the body in the original SKILL.md string. */
+  readonly bodyStartOffset: number;
 }
 
 export interface MutableAgentSkillMetadata {

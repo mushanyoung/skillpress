@@ -15,14 +15,53 @@ describe("Agent Skill document envelopes", () => {
     expect(envelope("---\nname: lf\n---\nbody\n").result).toEqual({
       yaml: "name: lf\n",
       body: "body\n",
+      bodyStartLine: 4,
+      bodyStartOffset: 17,
     });
     expect(envelope("---\r\nname: crlf\r\n---\r\nbody\r\n").result).toEqual({
       yaml: "name: crlf\r\n",
       body: "body\r\n",
+      bodyStartLine: 4,
+      bodyStartOffset: 22,
     });
     expect(envelope("---\rname: cr\r---\rbody\r").result).toEqual({
       yaml: "name: cr\r",
       body: "body\r",
+      bodyStartLine: 4,
+      bodyStartOffset: 17,
+    });
+  });
+
+  it("reports UTF-16 body offsets and hypothetical empty-body lines", () => {
+    const astral = "---\nname: 😀\n---\nbody";
+    expect(envelope(astral).result).toMatchObject({
+      body: "body",
+      bodyStartLine: 4,
+      bodyStartOffset: astral.indexOf("body"),
+    });
+    expect(Buffer.byteLength(astral.slice(0, astral.indexOf("body")), "utf8")).not.toBe(
+      astral.indexOf("body"),
+    );
+    expect(envelope("---\r\nname: empty\r\n---").result).toMatchObject({
+      body: "",
+      bodyStartLine: 4,
+      bodyStartOffset: 21,
+    });
+    expect(envelope("---\n---").result).toMatchObject({
+      body: "",
+      bodyStartLine: 3,
+      bodyStartOffset: 7,
+    });
+    expect(envelope("---\n---\n").result).toMatchObject({
+      body: "",
+      bodyStartLine: 3,
+      bodyStartOffset: 8,
+    });
+    const mixed = "---\r\nname: mixed\r---\n\nbody";
+    expect(envelope(mixed).result).toMatchObject({
+      body: "\nbody",
+      bodyStartLine: 4,
+      bodyStartOffset: mixed.indexOf("\nbody"),
     });
   });
 

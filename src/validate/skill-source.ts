@@ -10,6 +10,10 @@ interface TextLine {
 export interface SkillDocumentEnvelope {
   readonly yaml: string;
   readonly body: string;
+  /** One-based source line containing the first body character. */
+  readonly bodyStartLine: number;
+  /** UTF-16 code-unit offset into the original document string. */
+  readonly bodyStartOffset: number;
 }
 
 function lineAt(text: string, start: number): TextLine {
@@ -81,6 +85,7 @@ export function parseSkillDocumentEnvelope(
     return undefined;
   }
   let closing: TextLine | undefined;
+  let closingLine = 2;
   for (let cursor = opening.next; cursor < text.length; ) {
     const line = lineAt(text, cursor);
     if (line.content === "---") {
@@ -89,6 +94,7 @@ export function parseSkillDocumentEnvelope(
     }
     if (line.next === cursor) break;
     cursor = line.next;
+    closingLine += 1;
   }
   if (closing === undefined) {
     diagnostics.add(
@@ -111,5 +117,10 @@ export function parseSkillDocumentEnvelope(
     );
     return undefined;
   }
-  return { yaml, body: text.slice(closing.next) };
+  return {
+    yaml,
+    body: text.slice(closing.next),
+    bodyStartLine: closingLine + 1,
+    bodyStartOffset: closing.next,
+  };
 }
