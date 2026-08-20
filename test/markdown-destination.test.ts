@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { Buffer } from "node:buffer";
 import { posix, win32 } from "node:path";
+
+import { describe, expect, it } from "vitest";
 
 import {
   classifyMarkdownDestination,
+  isCanonicalDecodedMarkdownLocalComponent,
   MAX_SKILL_REFERENCE_COMPONENT_BYTES,
   MAX_SKILL_REFERENCE_DESTINATION_BYTES,
   MAX_SKILL_REFERENCE_PATH_COMPONENTS,
@@ -64,6 +67,56 @@ describe("Markdown destination classification", () => {
     ] as const;
     for (const [value, path] of cases) {
       expect(classifyMarkdownDestination(value)).toEqual(local(path));
+    }
+  });
+
+  it("shares the exact domain of one already-decoded local component", () => {
+    const accepted = ["guide.md", "a b.md", "é.md", "😀".repeat(63), "\u0378.md"];
+    for (const value of accepted) {
+      expect(isCanonicalDecodedMarkdownLocalComponent(value)).toBe(true);
+      expect(classifyMarkdownDestination(value)).toEqual(local(value));
+    }
+
+    const rejected = [
+      undefined,
+      null,
+      7,
+      "",
+      ".",
+      "..",
+      "/",
+      "\\",
+      "%",
+      "#",
+      "?",
+      "\u00a0",
+      "e\u0301.md",
+      "bad\u2060.md",
+      "bad\ud800.md",
+      `${String.fromCodePoint(0xfdd0)}.md`,
+      "a".repeat(MAX_SKILL_REFERENCE_COMPONENT_BYTES + 1),
+      "😀".repeat(64),
+      "CON.txt",
+      "name:stream",
+      "trailing.",
+      "trailing ",
+    ];
+    for (const value of rejected) {
+      expect(isCanonicalDecodedMarkdownLocalComponent(value)).toBe(false);
+    }
+    expect(classifyMarkdownDestination("\u00a0")).toEqual({
+      kind: "invalid",
+      reason: "nonportable_component",
+    });
+
+    for (const raw of ["references/guide.md", "assets/a%20diagram.png#part", "\u0378/ok"]) {
+      const result = classifyMarkdownDestination(raw);
+      expect(result.kind).toBe("local");
+      if (result.kind === "local") {
+        for (const component of result.components) {
+          expect(isCanonicalDecodedMarkdownLocalComponent(component)).toBe(true);
+        }
+      }
     }
   });
 
@@ -323,6 +376,74 @@ describe("Markdown destination classification", () => {
     ).toEqual({ kind: "invalid", reason: "too_large" });
   });
 
+  it("uses captured classifier and transitive path-safety intrinsics", () => {
+    const defineProperty = Object.defineProperty;
+    const targets = [
+      [Reflect, "apply"],
+      [Buffer, "byteLength"],
+      [Buffer, "from"],
+      [Buffer.prototype, "toString"],
+      [globalThis, "decodeURIComponent"],
+      [Object, "defineProperty"],
+      [Object, "freeze"],
+      [RegExp.prototype, "exec"],
+      [RegExp.prototype, Symbol.search],
+      [RegExp.prototype, Symbol.split],
+      [Set.prototype, "has"],
+      [String.prototype, "codePointAt"],
+      [String.prototype, "endsWith"],
+      [String.prototype, "includes"],
+      [String.prototype, "indexOf"],
+      [String.prototype, "normalize"],
+      [String.prototype, "search"],
+      [String.prototype, "slice"],
+      [String.prototype, "split"],
+      [String.prototype, "startsWith"],
+      [String.prototype, "toLowerCase"],
+      [String.prototype, "trim"],
+      [Array.prototype, Symbol.iterator],
+    ] as const;
+    const originals = targets.map(([target, key]) => Object.getOwnPropertyDescriptor(target, key));
+    const poison = () => {
+      throw new Error("live intrinsic used");
+    };
+    let accepted: ReturnType<typeof classifyMarkdownDestination> | undefined;
+    let dangerous: ReturnType<typeof classifyMarkdownDestination> | undefined;
+    let external: ReturnType<typeof classifyMarkdownDestination> | undefined;
+    let unsafe: ReturnType<typeof classifyMarkdownDestination> | undefined;
+    let componentResults: readonly boolean[] = [];
+
+    try {
+      for (let index = 0; index < targets.length; index += 1) {
+        const target = targets[index] as (typeof targets)[number];
+        defineProperty(target[0], target[1], {
+          configurable: true,
+          value: poison,
+          writable: true,
+        });
+      }
+      accepted = classifyMarkdownDestination("assets/a%20diagram.png#overview");
+      dangerous = classifyMarkdownDestination("DATA:text/plain,hello");
+      external = classifyMarkdownDestination("//cdn.example.com/diagram.png");
+      unsafe = classifyMarkdownDestination("references/bad\u2060");
+      componentResults = [
+        isCanonicalDecodedMarkdownLocalComponent("\u0378"),
+        isCanonicalDecodedMarkdownLocalComponent("\u00a0"),
+      ];
+    } finally {
+      for (let index = targets.length - 1; index >= 0; index -= 1) {
+        const target = targets[index] as (typeof targets)[number];
+        defineProperty(target[0], target[1], originals[index] as PropertyDescriptor);
+      }
+    }
+
+    expect(accepted).toEqual(local("assets/a diagram.png"));
+    expect(dangerous).toEqual({ kind: "invalid", reason: "unsafe_scheme" });
+    expect(external).toEqual({ kind: "external" });
+    expect(unsafe).toEqual({ kind: "invalid", reason: "unsafe_unicode" });
+    expect(componentResults).toEqual([true, false]);
+  });
+
   it("is total and keeps every accepted local path lexical under deterministic fuzz", () => {
     let state = 0x5a17c9e3;
     for (let sample = 0; sample < 10_000; sample += 1) {
@@ -335,6 +456,12 @@ describe("Markdown destination classification", () => {
       }
       const result = classifyMarkdownDestination(value);
       expect(Object.isFrozen(result)).toBe(true);
+      expect(isCanonicalDecodedMarkdownLocalComponent(value)).toBe(
+        result.kind === "local" &&
+          result.path === value &&
+          result.components.length === 1 &&
+          result.components[0] === value,
+      );
       if (result.kind === "local") {
         expect(result.path.normalize("NFC")).toBe(result.path);
         expect(posix.normalize(result.path)).toBe(result.path);
