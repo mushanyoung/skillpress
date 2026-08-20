@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { type BigIntStats, constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { TextDecoder } from "node:util";
@@ -11,11 +12,25 @@ import { MAX_SKILL_DOCUMENT_BYTES } from "./types.js";
 
 const READ_BUFFER_BYTES = 64 * 1024;
 
-// Module initialization is the trust boundary for the result-wrapper intrinsics.
+// Module initialization is the trust boundary for filesystem bindings and read/result intrinsics.
 const applySnapshot = Reflect.apply;
+const bigIntSnapshot = BigInt;
+const bufferConstructorSnapshot = Buffer;
+const bufferAllocSnapshot = bufferConstructorSnapshot.alloc;
+const numberConstructorSnapshot = Number;
+const isSafeIntegerSnapshot = numberConstructorSnapshot.isSafeInteger;
 const objectConstructorSnapshot = Object;
 const definePropertySnapshot = Object.defineProperty;
 const freezeSnapshot = Object.freeze;
+const lstatSnapshot = lstat;
+const openSnapshot = open;
+const textDecoderConstructorSnapshot = TextDecoder;
+const textDecoderDecodeSnapshot = TextDecoder.prototype.decode;
+
+const READ_ONLY_FLAG = constants.O_RDONLY;
+const NO_FOLLOW_FLAG = (constants as Partial<typeof constants>).O_NOFOLLOW;
+const NON_BLOCK_FLAG = (constants as Partial<typeof constants>).O_NONBLOCK;
+const BIGINT_STAT_OPTIONS = freezeSnapshot({ bigint: true as const });
 
 export interface InspectedFile {
   readonly path: string;
@@ -71,20 +86,17 @@ type SimpleReadFailureReason =
   | "io";
 
 const DEFAULT_IO: InspectedFileReadIo = freezeSnapshot({
-  lstatPath: (path: string) => lstat(path, { bigint: true }),
-  openFile: open,
+  lstatPath: (path: string) => lstatSnapshot(path, BIGINT_STAT_OPTIONS),
+  openFile: openSnapshot,
   capabilities: freezeSnapshot({
-    noFollow:
-      typeof (constants as Partial<typeof constants>).O_NOFOLLOW === "number" &&
-      (constants as Partial<typeof constants>).O_NOFOLLOW !== 0,
-    nonBlock:
-      typeof (constants as Partial<typeof constants>).O_NONBLOCK === "number" &&
-      (constants as Partial<typeof constants>).O_NONBLOCK !== 0,
+    noFollow: typeof NO_FOLLOW_FLAG === "number" && NO_FOLLOW_FLAG !== 0,
+    nonBlock: typeof NON_BLOCK_FLAG === "number" && NON_BLOCK_FLAG !== 0,
   }),
 });
 
-const NO_FOLLOW_FLAG = (constants as Partial<typeof constants>).O_NOFOLLOW;
-const NON_BLOCK_FLAG = (constants as Partial<typeof constants>).O_NONBLOCK;
+function allocateBuffer(byteLength: number): Buffer {
+  return applySnapshot(bufferAllocSnapshot, undefined, [byteLength]) as Buffer;
+}
 
 function copyInspectedFile(inspected: InspectedFile): InspectedFile | undefined {
   const path = inspected.path;
@@ -146,7 +158,7 @@ export async function readInspectedUtf8File<T extends InspectedFile>(
 ): Promise<InspectedUtf8FileReadResult> {
   let handle: InspectedFileHandle | undefined;
   try {
-    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > MAX_SKILL_DOCUMENT_BYTES) {
+    if (!isSafeIntegerSnapshot(maxBytes) || maxBytes < 0 || maxBytes > MAX_SKILL_DOCUMENT_BYTES) {
       return failure("invalid-metadata");
     }
     const current = copyInspectedFile(inspected);
@@ -171,7 +183,7 @@ export async function readInspectedUtf8File<T extends InspectedFile>(
     if (inspectedSize < 0n) {
       return failure("invalid-metadata");
     }
-    if (inspectedSize > BigInt(maxBytes)) {
+    if (inspectedSize > bigIntSnapshot(maxBytes)) {
       return failure("too-large");
     }
 
@@ -186,24 +198,31 @@ export async function readInspectedUtf8File<T extends InspectedFile>(
 
     handle = await openFile(
       current.path,
-      constants.O_RDONLY | (canNoFollow ? noFollow : 0) | (canOpenNonBlocking ? nonBlock : 0),
+      READ_ONLY_FLAG | (canNoFollow ? noFollow : 0) | (canOpenNonBlocking ? nonBlock : 0),
     );
     const opened = snapshotFileMetadata(await handle.stat({ bigint: true }));
     if (opened.kind !== "file" || !sameFileSnapshot(current.metadata, opened)) {
       return changed("file", "opening");
     }
 
-    const chunks: Buffer[] = [];
-    const buffer = Buffer.alloc(READ_BUFFER_BYTES);
+    const expectedLength = numberConstructorSnapshot(opened.size);
+    const buffer = allocateBuffer(READ_BUFFER_BYTES);
+    const privateBytes = allocateBuffer(expectedLength);
     let total = 0;
     while (total <= maxBytes) {
-      const requested = Math.min(buffer.length, maxBytes + 1 - total);
+      const remaining = maxBytes + 1 - total;
+      const requested = remaining < READ_BUFFER_BYTES ? remaining : READ_BUFFER_BYTES;
       const { bytesRead } = await handle.read(buffer, 0, requested, null);
-      if (!Number.isSafeInteger(bytesRead) || bytesRead < 0 || bytesRead > requested) {
+      if (!isSafeIntegerSnapshot(bytesRead) || bytesRead < 0 || bytesRead > requested) {
         return failure("invalid-read");
       }
       if (bytesRead === 0) break;
-      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+      for (let byteIndex = 0; byteIndex < bytesRead; byteIndex += 1) {
+        const sourceByte = buffer[byteIndex];
+        if (typeof sourceByte !== "number") return failure("invalid-read");
+        const absoluteIndex = total + byteIndex;
+        if (absoluteIndex < expectedLength) privateBytes[absoluteIndex] = sourceByte;
+      }
       total += bytesRead;
     }
     if (total > maxBytes) return failure("too-large");
@@ -219,7 +238,7 @@ export async function readInspectedUtf8File<T extends InspectedFile>(
     const finalPath = snapshotFileMetadata(await lstatPath(current.path));
     const contextIsCurrent = (await inspectionIsCurrent(inspected)) === true;
     if (
-      BigInt(total) !== opened.size ||
+      bigIntSnapshot(total) !== opened.size ||
       !sameFileSnapshot(opened, afterRead) ||
       !sameFileSnapshot(opened, finalPath) ||
       finalPath.kind !== "file"
@@ -230,8 +249,8 @@ export async function readInspectedUtf8File<T extends InspectedFile>(
 
     let text: string;
     try {
-      const bytes = Buffer.concat(chunks, total);
-      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+      const decoder = new textDecoderConstructorSnapshot("utf-8", { fatal: true, ignoreBOM: true });
+      text = applySnapshot(textDecoderDecodeSnapshot, decoder, [privateBytes]) as string;
     } catch {
       return failure("invalid-utf8");
     }

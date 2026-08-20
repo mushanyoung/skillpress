@@ -1,8 +1,11 @@
+import bufferModule from "node:buffer";
 import type { BigIntStats } from "node:fs";
 import { constants } from "node:fs";
-import { lstat, open, readFile } from "node:fs/promises";
+import fsPromisesModule, { lstat, open, readFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import utilModule, { TextDecoder as NodeTextDecoder } from "node:util";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   type FileOpenCapabilities,
@@ -23,10 +26,39 @@ const NON_BLOCK_FLAG = (constants as Partial<typeof constants>).O_NONBLOCK;
 const HAS_NO_FOLLOW = typeof NO_FOLLOW_FLAG === "number" && NO_FOLLOW_FLAG !== 0;
 const HAS_NON_BLOCK = typeof NON_BLOCK_FLAG === "number" && NON_BLOCK_FLAG !== 0;
 const THEN_PROPERTY = "then";
+const definePropertyIntrinsic = Object.defineProperty;
+const deletePropertyIntrinsic = Reflect.deleteProperty;
+const getOwnPropertyDescriptorIntrinsic = Object.getOwnPropertyDescriptor;
+
+type PropertyMutation = readonly [object, PropertyKey, PropertyDescriptor];
+
+async function withPropertyMutations<T>(
+  mutations: readonly PropertyMutation[],
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = mutations.map(([target, key]) => getOwnPropertyDescriptorIntrinsic(target, key));
+  let applied = 0;
+  try {
+    for (; applied < mutations.length; applied += 1) {
+      const [target, key, descriptor] = mutations[applied] as PropertyMutation;
+      definePropertyIntrinsic(target, key, descriptor);
+    }
+    return await operation();
+  } finally {
+    for (let index = applied - 1; index >= 0; index -= 1) {
+      const [target, key] = mutations[index] as PropertyMutation;
+      const descriptor = previous[index];
+      if (descriptor === undefined) deletePropertyIntrinsic(target, key);
+      else definePropertyIntrinsic(target, key, descriptor);
+    }
+  }
+}
 
 interface HandleOptions {
   readonly afterStats?: BigIntStats;
   readonly closeFails?: boolean;
+  readonly detachAfterRead?: boolean;
+  readonly maxReadBytes?: number;
   readonly onClose?: () => void;
   readonly onRead?: (requested: number) => number | undefined;
   readonly onStat?: (call: number) => void;
@@ -48,9 +80,18 @@ function handleFor(
     async read(buffer, offset, length) {
       const overridden = options.onRead?.(length);
       if (overridden !== undefined) return { bytesRead: overridden };
-      const bytesRead = Math.min(length, bytes.length - position);
-      buffer.set(bytes.subarray(position, position + bytesRead), offset);
+      const available = bytes.length - position;
+      let bytesRead = length < available ? length : available;
+      if (options.maxReadBytes !== undefined && options.maxReadBytes < bytesRead) {
+        bytesRead = options.maxReadBytes;
+      }
+      for (let index = 0; index < bytesRead; index += 1) {
+        buffer[offset + index] = bytes[position + index] as number;
+      }
       position += bytesRead;
+      if (options.detachAfterRead === true) {
+        structuredClone(buffer.buffer, { transfer: [buffer.buffer as ArrayBuffer] });
+      }
       return { bytesRead };
     },
     async close() {
@@ -152,8 +193,8 @@ describe("bounded inspected UTF-8 file reads", () => {
     expect(result).toEqual({ ok: true, text: "", byteLength: 0 });
   });
 
-  it("preserves a BOM and a multibyte sequence split across read chunks", async () => {
-    const text = `\uFEFF${"a".repeat(64 * 1024 - 4)}é`;
+  it("preserves a BOM across an exact 64 KiB plus 17-byte split UTF-8 sequence", async () => {
+    const text = `\uFEFF${"a".repeat(64 * 1024 - 4)}€${"b".repeat(15)}`;
     const bytes = Buffer.from(text, "utf8");
     const { inspected } = await inspectedFixture("generic-chunks", bytes);
     const result = await readInspectedUtf8File(inspected, bytes.length, async () => true);
@@ -476,6 +517,25 @@ describe("bounded inspected UTF-8 file reads", () => {
     expect(closes).toBe(1);
   });
 
+  it("rejects a detached read buffer before copying any non-number source byte", async () => {
+    const { inspected, stats } = await inspectedFixture("detached-read", "x");
+    let closes = 0;
+    const result = await readInspectedUtf8File(
+      inspected,
+      1,
+      async () => true,
+      ioFor(
+        stats,
+        handleFor(stats, Buffer.from("x"), {
+          detachAfterRead: true,
+          onClose: () => (closes += 1),
+        }),
+      ),
+    );
+    expect(result).toEqual({ ok: false, reason: "invalid-read" });
+    expect(closes).toBe(1);
+  });
+
   it("reads only maxBytes plus one and returns too-large without post-read checks", async () => {
     const { inspected, stats } = await inspectedFixture("growth-limit", "abc");
     let contextCalls = 0;
@@ -746,6 +806,124 @@ describe("bounded inspected UTF-8 file reads", () => {
         ioCalls: 0,
       });
     }
+  });
+
+  it("keeps SAFE bytes across individual and combined live FORGED intrinsic pollution", async () => {
+    const safeBytes = Uint8Array.from([0x53, 0x41, 0x46, 0x45]);
+    const { inspected, stats } = await inspectedFixture("captured-copy-intrinsics", safeBytes);
+    let poisonCalls = 0;
+    const poison = () => {
+      poisonCalls += 1;
+      return "FORGED";
+    };
+    const mutations: readonly PropertyMutation[] = [
+      [Number, "isSafeInteger", { configurable: true, value: poison }],
+      [globalThis, "Number", { configurable: true, value: poison }],
+      [globalThis, "BigInt", { configurable: true, value: poison }],
+      [Buffer, "alloc", { configurable: true, value: poison }],
+      [Buffer, "from", { configurable: true, value: poison }],
+      [Buffer, "concat", { configurable: true, value: poison }],
+      [Buffer.prototype, "subarray", { configurable: true, value: poison }],
+      ...(["valueOf", "buffer", "byteOffset", "length", "0"] as const).map(
+        (key) => [Buffer.prototype, key, { configurable: true, get: poison }] as const,
+      ),
+      [Buffer, "poolSize", { configurable: true, get: poison }],
+      [Buffer, Symbol.species, { configurable: true, get: poison }],
+      [Math, "min", { configurable: true, value: poison }],
+      [Array.prototype, "push", { configurable: true, value: poison }],
+      [Array.prototype, "0", { configurable: true, set: poison }],
+      [NodeTextDecoder.prototype, "decode", { configurable: true, value: poison }],
+      [Reflect, "apply", { configurable: true, value: poison }],
+      [Object, "defineProperty", { configurable: true, value: poison }],
+      [Object, "freeze", { configurable: true, value: poison }],
+    ];
+
+    const readSafe = () =>
+      readInspectedUtf8File(
+        inspected,
+        4,
+        async () => true,
+        ioFor(stats, handleFor(stats, safeBytes), {
+          noFollow: false,
+          nonBlock: false,
+        }),
+      );
+
+    for (let index = 0; index <= mutations.length; index += 1) {
+      const before = poisonCalls;
+      const selected =
+        index === mutations.length ? mutations : [mutations[index] as PropertyMutation];
+      const observed = await withPropertyMutations(selected, readSafe);
+      expect(observed).toEqual({ ok: true, text: "SAFE", byteLength: 4 });
+      expect(poisonCalls).toBe(before);
+    }
+  });
+
+  it("retains captured native lstat, open, Buffer, and TextDecoder bindings", async () => {
+    const { inspected, stats } = await inspectedFixture("captured-native-bindings", "SAFE");
+    const allocDescriptor = getOwnPropertyDescriptorIntrinsic(Buffer, "alloc");
+    if (allocDescriptor === undefined) throw new Error("missing Buffer.alloc");
+    const nativeAlloc = Buffer.alloc;
+    const allocSizes: number[] = [];
+    let allocCalls = 0;
+    function countedAlloc(this: unknown, size: number): Buffer {
+      if (this !== undefined) throw new Error("unexpected Buffer.alloc receiver");
+      allocSizes[allocCalls] = size;
+      allocCalls += 1;
+      return Reflect.apply(nativeAlloc, undefined, [size]);
+    }
+    definePropertyIntrinsic(Buffer, "alloc", { ...allocDescriptor, value: countedAlloc });
+    vi.resetModules();
+    let isolated: typeof import("../src/validate/file-read.js");
+    try {
+      isolated = await import("../src/validate/file-read.js");
+    } finally {
+      definePropertyIntrinsic(Buffer, "alloc", allocDescriptor);
+    }
+    let readCalls = 0;
+    const shortRead = await isolated.readInspectedUtf8File(
+      inspected,
+      4,
+      async () => true,
+      ioFor(
+        stats,
+        handleFor(stats, Buffer.from("SAFE"), {
+          maxReadBytes: 1,
+          onRead: () => {
+            readCalls += 1;
+            return undefined;
+          },
+        }),
+      ),
+    );
+    expect(shortRead).toEqual({ ok: true, text: "SAFE", byteLength: 4 });
+    expect({ allocSizes, readCalls }).toEqual({
+      allocSizes: [64 * 1024, 4],
+      readCalls: 5,
+    });
+    let poisonCalls = 0;
+    const poison = (): never => {
+      poisonCalls += 1;
+      throw new Error("synchronized builtin binding used");
+    };
+    const mutations: readonly PropertyMutation[] = [
+      [fsPromisesModule, "lstat", { configurable: true, value: poison }],
+      [fsPromisesModule, "open", { configurable: true, value: poison }],
+      [bufferModule, "Buffer", { configurable: true, value: poison }],
+      [utilModule, "TextDecoder", { configurable: true, value: poison }],
+    ];
+    let result: Awaited<ReturnType<typeof readInspectedUtf8File>> | undefined;
+    try {
+      result = await withPropertyMutations(mutations, async () => {
+        syncBuiltinESMExports();
+        return isolated.readInspectedUtf8File(inspected, 4, async () => true);
+      });
+    } finally {
+      syncBuiltinESMExports();
+    }
+    if (result === undefined) throw new Error("missing file-read result");
+    expectAsyncResultRecord(result, { ok: true, text: "SAFE", byteLength: 4 });
+    expect([allocCalls, poisonCalls]).toEqual([4, 0]);
   });
 
   it("uses captured result intrinsics after live Reflect and Object pollution", async () => {
