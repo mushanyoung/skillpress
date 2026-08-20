@@ -125,8 +125,21 @@ const DEFAULT_IO: ResourceTreeCaptureIo = freezeSnapshot({
   rootIsCurrent: (root: RootInspection) => rootInspectionIsCurrentSnapshot(root),
 });
 
+/**
+ * Add a C-local non-thenable barrier to one outer async result record.
+ * This does not harden upstream promises, nested values, or native Promise machinery.
+ */
+function freezeAsyncResult<T extends object>(value: T): Readonly<T> {
+  applyIntrinsic<object>(definePropertySnapshot, Object, [
+    value,
+    "then",
+    { configurable: false, enumerable: false, value: undefined, writable: false },
+  ]);
+  return freezeSnapshot(value);
+}
+
 function fixedFailure(reason: ResourceTreeCaptureFailureReason): ResourceTreeCaptureFailure {
-  return freezeSnapshot({ ok: false, reason });
+  return freezeAsyncResult({ ok: false, reason });
 }
 
 const INVALID_INPUT = fixedFailure("invalid_input");
@@ -273,7 +286,9 @@ async function captureMetadata(
     undefined,
     [path, signal, io],
   );
-  return result.ok ? result : lstatFailure(result);
+  return result.ok
+    ? freezeAsyncResult({ ok: true as const, metadata: result.metadata })
+    : lstatFailure(result);
 }
 
 async function boundedAwait<T>(
@@ -295,7 +310,7 @@ async function boundedAwait<T>(
   if (after === "invalid") return INVALID_INPUT;
   if (after === "aborted") return ABORTED;
   if (rejected) return IO;
-  return freezeSnapshot({ ok: true, value: value as T });
+  return freezeAsyncResult({ ok: true as const, value: value as T });
 }
 
 async function captureDirectory(
@@ -313,7 +328,11 @@ async function captureDirectory(
   if (!bounded.ok) return bounded;
   const result = bounded.value;
   return result.ok
-    ? freezeSnapshot({ ok: true, names: result.names, metadata: result.directory.metadata })
+    ? freezeAsyncResult({
+        ok: true as const,
+        names: result.names,
+        metadata: result.directory.metadata,
+      })
     : directoryFailure(result);
 }
 
@@ -524,8 +543,8 @@ export async function captureInspectedResourceTree(
       metadata: rootDirectory.metadata,
       names: rootDirectory.names,
     });
-    return freezeSnapshot({
-      ok: true,
+    return freezeAsyncResult({
+      ok: true as const,
       root: capturedRoot,
       entries: freezeSnapshot(state.entries),
     });
