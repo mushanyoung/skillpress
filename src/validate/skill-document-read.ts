@@ -1,22 +1,18 @@
-import { type BigIntStats, constants } from "node:fs";
+import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
-import { TextDecoder } from "node:util";
 
 import {
-  type FileMetadataSnapshot,
-  sameFileSnapshot,
-  snapshotFileMetadata,
-} from "./file-metadata.js";
+  type FileOpenCapabilities,
+  type InspectedFile,
+  type InspectedFileHandle,
+  readInspectedUtf8File,
+} from "./file-read.js";
 import type { RootInspection } from "./skill-root.js";
 import { rootInspectionIsCurrent } from "./skill-root.js";
 import { MAX_SKILL_DOCUMENT_BYTES } from "./types.js";
 
-const READ_BUFFER_BYTES = 64 * 1024;
-
-export interface DocumentInspection {
+export interface DocumentInspection extends InspectedFile {
   readonly root: RootInspection;
-  readonly path: string;
-  readonly metadata: FileMetadataSnapshot;
 }
 
 type ReadFailureCode =
@@ -29,28 +25,15 @@ export type SkillDocumentReadResult =
   | { readonly ok: true; readonly text: string }
   | { readonly ok: false; readonly code: ReadFailureCode; readonly message: string };
 
-export interface SkillFileHandle {
-  stat(options: { readonly bigint: true }): Promise<BigIntStats>;
-  read(
-    buffer: Buffer,
-    offset: number,
-    length: number,
-    position: null,
-  ): Promise<{ readonly bytesRead: number }>;
-  close(): Promise<void>;
-}
-
-export type OpenSkillFile = (path: string, flags: number) => Promise<SkillFileHandle>;
+export type SkillFileHandle = InspectedFileHandle;
+export type OpenSkillFile = (path: string, flags: number) => Promise<InspectedFileHandle>;
 export type VerifySkillRoot = (root: RootInspection) => Promise<boolean>;
 
 /** @internal Cross-platform override used only by filesystem race tests. */
-export interface SkillFileOpenCapabilities {
-  readonly noFollow: number | undefined;
-  readonly nonBlock: number | undefined;
-}
+export type SkillFileOpenCapabilities = FileOpenCapabilities;
 
 function failure(code: ReadFailureCode, message: string): SkillDocumentReadResult {
-  return { ok: false, code, message };
+  return Object.freeze({ ok: false, code, message });
 }
 
 /** @internal Reads an already-inspected document without following a replacement symlink. */
@@ -58,92 +41,59 @@ export async function readInspectedAgentSkillDocument(
   inspected: DocumentInspection,
   openFile: OpenSkillFile = open,
   capabilities: SkillFileOpenCapabilities = {
-    noFollow: (constants as Partial<typeof constants>).O_NOFOLLOW,
-    nonBlock: (constants as Partial<typeof constants>).O_NONBLOCK,
+    noFollow:
+      typeof (constants as Partial<typeof constants>).O_NOFOLLOW === "number" &&
+      (constants as Partial<typeof constants>).O_NOFOLLOW !== 0,
+    nonBlock:
+      typeof (constants as Partial<typeof constants>).O_NONBLOCK === "number" &&
+      (constants as Partial<typeof constants>).O_NONBLOCK !== 0,
   },
   verifyRoot: VerifySkillRoot = rootInspectionIsCurrent,
 ): Promise<SkillDocumentReadResult> {
-  let handle: SkillFileHandle | undefined;
+  let root: RootInspection;
   try {
-    if (!(await verifyRoot(inspected.root))) {
-      return failure(
-        "skill.document.changed",
-        "skill directory changed before SKILL.md was opened",
-      );
-    }
-    if (inspected.metadata.size > BigInt(MAX_SKILL_DOCUMENT_BYTES)) {
-      return failure(
-        "skill.document.too_large",
-        `SKILL.md exceeds ${MAX_SKILL_DOCUMENT_BYTES} bytes`,
-      );
-    }
-    if (inspected.metadata.size < 0n) {
-      return failure("skill.document.read", "SKILL.md has invalid filesystem metadata");
-    }
-    const { noFollow, nonBlock } = capabilities;
-    const canNoFollow = typeof noFollow === "number" && noFollow !== 0;
-    const canOpenNonBlocking = typeof nonBlock === "number" && nonBlock !== 0;
-    if (!canNoFollow) {
-      const beforeOpen = snapshotFileMetadata(await lstat(inspected.path, { bigint: true }));
-      if (!sameFileSnapshot(inspected.metadata, beforeOpen) || beforeOpen.kind !== "file") {
-        return failure("skill.document.changed", "SKILL.md changed before it was opened");
-      }
-    }
-    handle = await openFile(
-      inspected.path,
-      constants.O_RDONLY | (canNoFollow ? noFollow : 0) | (canOpenNonBlocking ? nonBlock : 0),
-    );
-    const opened = snapshotFileMetadata(await handle.stat({ bigint: true }));
-    if (opened.kind !== "file" || !sameFileSnapshot(inspected.metadata, opened)) {
-      return failure("skill.document.changed", "SKILL.md changed while it was being opened");
-    }
-    const chunks: Buffer[] = [];
-    const buffer = Buffer.alloc(READ_BUFFER_BYTES);
-    let total = 0;
-    while (total <= MAX_SKILL_DOCUMENT_BYTES) {
-      const requested = Math.min(buffer.length, MAX_SKILL_DOCUMENT_BYTES + 1 - total);
-      const { bytesRead } = await handle.read(buffer, 0, requested, null);
-      if (!Number.isSafeInteger(bytesRead) || bytesRead < 0 || bytesRead > requested) {
-        return failure("skill.document.read", "SKILL.md returned an invalid read result");
-      }
-      if (bytesRead === 0) break;
-      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
-      total += bytesRead;
-    }
-    if (total > MAX_SKILL_DOCUMENT_BYTES) {
-      return failure(
-        "skill.document.too_large",
-        `SKILL.md exceeds ${MAX_SKILL_DOCUMENT_BYTES} bytes`,
-      );
-    }
-
-    const afterRead = snapshotFileMetadata(await handle.stat({ bigint: true }));
-    const finalPath = snapshotFileMetadata(await lstat(inspected.path, { bigint: true }));
-    if (
-      BigInt(total) !== opened.size ||
-      !sameFileSnapshot(opened, afterRead) ||
-      !sameFileSnapshot(opened, finalPath) ||
-      finalPath.kind !== "file" ||
-      !(await verifyRoot(inspected.root))
-    ) {
-      return failure("skill.document.changed", "SKILL.md changed while it was being read");
-    }
-    try {
-      const bytes = Buffer.concat(chunks, total);
-      const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-      return { ok: true, text };
-    } catch {
-      return failure("skill.document.encoding", "SKILL.md must contain valid UTF-8");
-    }
+    root = inspected.root;
   } catch {
     return failure("skill.document.read", "SKILL.md cannot be read safely");
-  } finally {
-    if (handle !== undefined) {
-      try {
-        await handle.close();
-      } catch {
-        // The bytes are already copied into private memory; closing does not change them.
+  }
+  const result = await readInspectedUtf8File(
+    inspected,
+    MAX_SKILL_DOCUMENT_BYTES,
+    () => verifyRoot(root),
+    {
+      lstatPath: (path) => lstat(path, { bigint: true }),
+      openFile,
+      capabilities,
+    },
+  );
+  if (result.ok) return Object.freeze({ ok: true, text: result.text });
+  switch (result.reason) {
+    case "changed":
+      if (result.subject === "context" && result.phase === "before-open") {
+        return failure(
+          "skill.document.changed",
+          "skill directory changed before SKILL.md was opened",
+        );
       }
-    }
+      if (result.subject === "file" && result.phase === "before-open") {
+        return failure("skill.document.changed", "SKILL.md changed before it was opened");
+      }
+      if (result.subject === "file" && result.phase === "opening") {
+        return failure("skill.document.changed", "SKILL.md changed while it was being opened");
+      }
+      return failure("skill.document.changed", "SKILL.md changed while it was being read");
+    case "too-large":
+      return failure(
+        "skill.document.too_large",
+        `SKILL.md exceeds ${MAX_SKILL_DOCUMENT_BYTES} bytes`,
+      );
+    case "invalid-metadata":
+      return failure("skill.document.read", "SKILL.md has invalid filesystem metadata");
+    case "invalid-read":
+      return failure("skill.document.read", "SKILL.md returned an invalid read result");
+    case "invalid-utf8":
+      return failure("skill.document.encoding", "SKILL.md must contain valid UTF-8");
+    case "io":
+      return failure("skill.document.read", "SKILL.md cannot be read safely");
   }
 }

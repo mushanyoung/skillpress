@@ -26,7 +26,12 @@ describe("bounded Agent Skill document reads", () => {
     const result = await readInspectedAgentSkillDocument(inspection, async () =>
       open(replacement.path, "r"),
     );
-    expect(result).toMatchObject({ ok: false, code: "skill.document.changed" });
+    expect(result).toEqual({
+      ok: false,
+      code: "skill.document.changed",
+      message: "SKILL.md changed while it was being opened",
+    });
+    expect(Object.isFrozen(result)).toBe(true);
   });
 
   it.runIf(process.platform !== "win32")(
@@ -47,9 +52,13 @@ describe("bounded Agent Skill document reads", () => {
           opened = true;
           return open(moved, "r");
         },
-        { noFollow: undefined, nonBlock: undefined },
+        { noFollow: false, nonBlock: false },
       );
-      expect(result).toMatchObject({ ok: false, code: "skill.document.changed" });
+      expect(result).toEqual({
+        ok: false,
+        code: "skill.document.changed",
+        message: "SKILL.md changed before it was opened",
+      });
       expect(opened).toBe(false);
     },
   );
@@ -72,7 +81,11 @@ describe("bounded Agent Skill document reads", () => {
       symlinkSync(moved, container);
 
       const result = await readInspectedAgentSkillDocument(inspection);
-      expect(result).toMatchObject({ ok: false, code: "skill.document.changed" });
+      expect(result).toEqual({
+        ok: false,
+        code: "skill.document.changed",
+        message: "skill directory changed before SKILL.md was opened",
+      });
     },
   );
 
@@ -118,7 +131,11 @@ describe("bounded Agent Skill document reads", () => {
         closed = true;
       },
     }));
-    expect(invalidRead).toMatchObject({ ok: false, code: "skill.document.read" });
+    expect(invalidRead).toEqual({
+      ok: false,
+      code: "skill.document.read",
+      message: "SKILL.md returned an invalid read result",
+    });
     expect(closed).toBe(true);
 
     const thrown = await readInspectedAgentSkillDocument(inspection, async () => {
@@ -128,7 +145,11 @@ describe("bounded Agent Skill document reads", () => {
         },
       });
     });
-    expect(thrown).toMatchObject({ ok: false, code: "skill.document.read" });
+    expect(thrown).toEqual({
+      ok: false,
+      code: "skill.document.read",
+      message: "SKILL.md cannot be read safely",
+    });
   });
 
   it("bounds invalid metadata and streams while ignoring close failures", async () => {
@@ -142,7 +163,11 @@ describe("bounded Agent Skill document reads", () => {
       { ...inspection, metadata: { size: -1n } as typeof inspection.metadata },
       async () => open(fixture.path),
     );
-    expect(negative).toMatchObject({ ok: false, code: "skill.document.read" });
+    expect(negative).toEqual({
+      ok: false,
+      code: "skill.document.read",
+      message: "SKILL.md has invalid filesystem metadata",
+    });
 
     let closed = false;
     const oversizedStream = await readInspectedAgentSkillDocument(inspection, async () => ({
@@ -158,7 +183,11 @@ describe("bounded Agent Skill document reads", () => {
         throw new Error("close failed");
       },
     }));
-    expect(oversizedStream).toMatchObject({ ok: false, code: "skill.document.too_large" });
+    expect(oversizedStream).toEqual({
+      ok: false,
+      code: "skill.document.too_large",
+      message: `SKILL.md exceeds ${MAX_SKILL_DOCUMENT_BYTES} bytes`,
+    });
     expect(closed).toBe(true);
   });
 
@@ -178,7 +207,11 @@ describe("bounded Agent Skill document reads", () => {
         size: BigInt(MAX_SKILL_DOCUMENT_BYTES + 1),
       } as typeof inspection.metadata,
     });
-    expect(rejected).toMatchObject({ ok: false, code: "skill.document.too_large" });
+    expect(rejected).toEqual({
+      ok: false,
+      code: "skill.document.too_large",
+      message: `SKILL.md exceeds ${MAX_SKILL_DOCUMENT_BYTES} bytes`,
+    });
   });
 
   it("uses the non-mutating fallback for unchanged and missing files", async () => {
@@ -190,7 +223,7 @@ describe("bounded Agent Skill document reads", () => {
     const valid = await readInspectedAgentSkillDocument(
       inspection,
       async (path, flags) => open(path, flags),
-      { noFollow: undefined, nonBlock: undefined },
+      { noFollow: false, nonBlock: false },
     );
     expect(valid).toMatchObject({ ok: true });
 
@@ -198,8 +231,97 @@ describe("bounded Agent Skill document reads", () => {
     const missing = await readInspectedAgentSkillDocument(
       inspection,
       async () => open(fixture.path),
-      { noFollow: undefined, nonBlock: undefined },
+      { noFollow: false, nonBlock: false },
     );
-    expect(missing).toMatchObject({ ok: false, code: "skill.document.read" });
+    expect(missing).toEqual({
+      ok: false,
+      code: "skill.document.read",
+      message: "SKILL.md cannot be read safely",
+    });
+  });
+
+  it("preserves the post-read context-change message", async () => {
+    const fixture = await fixtures.skill(
+      "context-after-read",
+      skillDocument("name: context-after-read\ndescription: A description.\nlicense: MIT"),
+    );
+    const inspection = await inspectSkillFixture(fixture.directory, fixture.path);
+    let checks = 0;
+    const result = await readInspectedAgentSkillDocument(
+      inspection,
+      (path, flags) => open(path, flags),
+      {
+        noFollow:
+          typeof (constants as Partial<typeof constants>).O_NOFOLLOW === "number" &&
+          (constants as Partial<typeof constants>).O_NOFOLLOW !== 0,
+        nonBlock:
+          typeof (constants as Partial<typeof constants>).O_NONBLOCK === "number" &&
+          (constants as Partial<typeof constants>).O_NONBLOCK !== 0,
+      },
+      async () => {
+        checks += 1;
+        return checks === 1;
+      },
+    );
+    expect(result).toEqual({
+      ok: false,
+      code: "skill.document.changed",
+      message: "SKILL.md changed while it was being read",
+    });
+  });
+
+  it("captures the authoritative root before verification awaits", async () => {
+    const expected = await fixtures.skill(
+      "stable-root",
+      skillDocument("name: stable-root\ndescription: A description.\nlicense: MIT"),
+    );
+    const replacement = await fixtures.skill(
+      "replacement-root",
+      skillDocument("name: replacement-root\ndescription: A description.\nlicense: MIT"),
+    );
+    const inspection = await inspectSkillFixture(expected.directory, expected.path);
+    const other = await inspectSkillFixture(replacement.directory, replacement.path);
+    const mutable = { ...inspection };
+    const observed: Array<typeof inspection.root> = [];
+    const result = await readInspectedAgentSkillDocument(
+      mutable,
+      (path, flags) => open(path, flags),
+      {
+        noFollow:
+          typeof (constants as Partial<typeof constants>).O_NOFOLLOW === "number" &&
+          (constants as Partial<typeof constants>).O_NOFOLLOW !== 0,
+        nonBlock:
+          typeof (constants as Partial<typeof constants>).O_NONBLOCK === "number" &&
+          (constants as Partial<typeof constants>).O_NONBLOCK !== 0,
+      },
+      async (root) => {
+        observed.push(root);
+        mutable.root = other.root;
+        return true;
+      },
+    );
+    expect(result).toMatchObject({ ok: true });
+    expect(observed).toEqual([inspection.root, inspection.root]);
+  });
+
+  it("normalizes a hostile root getter before calling the generic reader", async () => {
+    const fixture = await fixtures.skill(
+      "hostile-root",
+      skillDocument("name: hostile-root\ndescription: A description.\nlicense: MIT"),
+    );
+    const inspection = await inspectSkillFixture(fixture.directory, fixture.path);
+    const hostile = new Proxy(inspection, {
+      get(target, property, receiver) {
+        if (property === "root") throw new Error("secret root getter");
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const result = await readInspectedAgentSkillDocument(hostile);
+    expect(result).toEqual({
+      ok: false,
+      code: "skill.document.read",
+      message: "SKILL.md cannot be read safely",
+    });
+    expect(JSON.stringify(result)).not.toContain("secret");
   });
 });
