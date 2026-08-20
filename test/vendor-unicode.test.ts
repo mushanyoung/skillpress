@@ -1,9 +1,15 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
 const repositoryRoot = new URL("../", import.meta.url);
+const repositoryPath = fileURLToPath(repositoryRoot);
+const execFileAsync = promisify(execFile);
 
 const unicodeFiles = [
   {
@@ -22,10 +28,32 @@ const unicodeFiles = [
     header: "# DerivedAge-15.1.0.txt\n",
     upstream: "https://www.unicode.org/Public/15.1.0/ucd/DerivedAge.txt",
   },
+  {
+    file: "DerivedCoreProperties.txt",
+    bytes: 1_072_686,
+    displayBytes: "1,072,686",
+    sha256: "f55d0db69123431a7317868725b1fcbf1eab6b265d756d1bd7f0f6d9f9ee108b",
+    header: "# DerivedCoreProperties-15.1.0.txt\n",
+    upstream: "https://www.unicode.org/Public/15.1.0/ucd/DerivedCoreProperties.txt",
+  },
 ] as const;
 
 function sha256(content: Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function provenanceTable(document: string): readonly string[] {
+  const lines = document.split("\n");
+  const start = lines.indexOf("| File | Upstream | Bytes | SHA-256 |");
+  if (start < 0) {
+    return [];
+  }
+
+  const rows: string[] = [];
+  for (let index = start; index < lines.length && lines[index]?.startsWith("|"); index += 1) {
+    rows.push(lines[index] ?? "");
+  }
+  return rows;
 }
 
 describe("vendored Unicode portability data", () => {
@@ -57,11 +85,20 @@ describe("vendored Unicode portability data", () => {
       "utf8",
     );
 
+    const expectedTable = [
+      "| File | Upstream | Bytes | SHA-256 |",
+      "| --- | --- | ---: | --- |",
+      ...unicodeFiles.map(
+        (entry) =>
+          `| \`${entry.file}\` | <${entry.upstream}> | ${entry.displayBytes} | ` +
+          `\`${entry.sha256}\` |`,
+      ),
+    ];
+    expect(provenanceTable(notice)).toEqual(expectedTable);
+    expect(provenanceTable(readme)).toEqual(expectedTable);
     for (const entry of unicodeFiles) {
-      expect(notice).toContain(`- <${entry.upstream}>`);
-      expect(readme).toContain(
-        `| \`${entry.file}\` | <${entry.upstream}> | ${entry.displayBytes} | \`${entry.sha256}\` |`,
-      );
+      expect(notice.split(entry.file)).toHaveLength(3);
+      expect(readme.split(entry.file)).toHaveLength(3);
     }
     expect(notice).toContain("[`LICENSES/Unicode-3.0.txt`](LICENSES/Unicode-3.0.txt)");
     expect(readme).toContain("[`LICENSES/Unicode-3.0.txt`](../../../LICENSES/Unicode-3.0.txt)");
@@ -82,5 +119,36 @@ describe("vendored Unicode portability data", () => {
       "README.md",
       "THIRD_PARTY_NOTICES.md",
     ]);
+    expect(manifest.files.some((path) => path === "vendor" || path.startsWith("vendor/"))).toBe(
+      false,
+    );
+
+    const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+    const { stdout } = await execFileAsync(
+      npm,
+      ["pack", "--dry-run", "--ignore-scripts", "--json"],
+      {
+        cwd: repositoryPath,
+        encoding: "utf8",
+        maxBuffer: 2 * 1024 * 1024,
+        timeout: 30_000,
+      },
+    );
+    type PackManifest = {
+      readonly files: ReadonlyArray<{ readonly path: string }>;
+    };
+    const parsed = JSON.parse(stdout) as readonly PackManifest[] | Record<string, PackManifest>;
+    const packs = Array.isArray(parsed) ? parsed : Object.values(parsed);
+    expect(packs).toHaveLength(1);
+    const packedPaths = packs[0]?.files.map((entry) => entry.path) ?? [];
+    expect(packedPaths).toContain("LICENSES/Unicode-3.0.txt");
+    expect(packedPaths).toContain("THIRD_PARTY_NOTICES.md");
+    expect(packedPaths.some((path) => path === "vendor" || path.startsWith("vendor/"))).toBe(false);
+
+    const rawDigests = new Set(unicodeFiles.map((entry) => entry.sha256));
+    const packedDigests = await Promise.all(
+      packedPaths.map(async (path) => sha256(await readFile(resolve(repositoryPath, path)))),
+    );
+    expect(packedDigests.some((digest) => rawDigests.has(digest))).toBe(false);
   });
 });
