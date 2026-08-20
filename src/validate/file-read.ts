@@ -11,6 +11,12 @@ import { MAX_SKILL_DOCUMENT_BYTES } from "./types.js";
 
 const READ_BUFFER_BYTES = 64 * 1024;
 
+// Module initialization is the trust boundary for the result-wrapper intrinsics.
+const applySnapshot = Reflect.apply;
+const objectConstructorSnapshot = Object;
+const definePropertySnapshot = Object.defineProperty;
+const freezeSnapshot = Object.freeze;
+
 export interface InspectedFile {
   readonly path: string;
   readonly metadata: FileMetadataSnapshot;
@@ -64,10 +70,10 @@ type SimpleReadFailureReason =
   | "invalid-utf8"
   | "io";
 
-const DEFAULT_IO: InspectedFileReadIo = Object.freeze({
+const DEFAULT_IO: InspectedFileReadIo = freezeSnapshot({
   lstatPath: (path: string) => lstat(path, { bigint: true }),
   openFile: open,
-  capabilities: Object.freeze({
+  capabilities: freezeSnapshot({
     noFollow:
       typeof (constants as Partial<typeof constants>).O_NOFOLLOW === "number" &&
       (constants as Partial<typeof constants>).O_NOFOLLOW !== 0,
@@ -96,14 +102,27 @@ function copyInspectedFile(inspected: InspectedFile): InspectedFile | undefined 
   ) {
     return undefined;
   }
-  return Object.freeze({
+  return freezeSnapshot({
     path,
-    metadata: Object.freeze({ dev, ino, mode, size, mtimeNs, ctimeNs, kind }),
+    metadata: freezeSnapshot({ dev, ino, mode, size, mtimeNs, ctimeNs, kind }),
   });
 }
 
+/**
+ * Adds a file-read-local non-thenable barrier to an outer async result record.
+ * Upstream promises, nested values, and native Promise machinery remain outside this boundary.
+ */
+function freezeAsyncResult<T extends object>(value: T): Readonly<T> {
+  applySnapshot(definePropertySnapshot, objectConstructorSnapshot, [
+    value,
+    "then",
+    { configurable: false, enumerable: false, value: undefined, writable: false },
+  ]);
+  return applySnapshot(freezeSnapshot, objectConstructorSnapshot, [value]) as Readonly<T>;
+}
+
 function failure(reason: SimpleReadFailureReason): InspectedUtf8FileReadResult {
-  return Object.freeze({ ok: false, reason });
+  return freezeAsyncResult({ ok: false as const, reason });
 }
 
 function changed(
@@ -113,9 +132,9 @@ function changed(
 ): InspectedUtf8FileReadResult {
   const [subject, phase] = change;
   if (subject === "context") {
-    return Object.freeze({ ok: false, reason: "changed", subject, phase });
+    return freezeAsyncResult({ ok: false as const, reason: "changed" as const, subject, phase });
   }
-  return Object.freeze({ ok: false, reason: "changed", subject, phase });
+  return freezeAsyncResult({ ok: false as const, reason: "changed" as const, subject, phase });
 }
 
 /** @internal Reads a bounded UTF-8 file while revalidating its inspection context. */
@@ -216,7 +235,7 @@ export async function readInspectedUtf8File<T extends InspectedFile>(
     } catch {
       return failure("invalid-utf8");
     }
-    return Object.freeze({ ok: true, text, byteLength: total });
+    return freezeAsyncResult({ ok: true as const, text, byteLength: total });
   } catch {
     return failure("io");
   } finally {

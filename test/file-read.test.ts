@@ -22,6 +22,7 @@ const NO_FOLLOW_FLAG = (constants as Partial<typeof constants>).O_NOFOLLOW;
 const NON_BLOCK_FLAG = (constants as Partial<typeof constants>).O_NONBLOCK;
 const HAS_NO_FOLLOW = typeof NO_FOLLOW_FLAG === "number" && NO_FOLLOW_FLAG !== 0;
 const HAS_NON_BLOCK = typeof NON_BLOCK_FLAG === "number" && NON_BLOCK_FLAG !== 0;
+const THEN_PROPERTY = "then";
 
 interface HandleOptions {
   readonly afterStats?: BigIntStats;
@@ -89,6 +90,46 @@ async function inspectedFixture(
   };
 }
 
+function expectAsyncResultRecord(value: object, enumerable: Record<string, unknown>): void {
+  expect(Object.getOwnPropertyDescriptor(value, THEN_PROPERTY)).toEqual({
+    configurable: false,
+    enumerable: false,
+    value: undefined,
+    writable: false,
+  });
+  expect(Object.keys(value)).toEqual(Object.keys(enumerable));
+  expect(JSON.parse(JSON.stringify(value))).toEqual(enumerable);
+  expect(Object.getPrototypeOf(value)).toBe(Object.prototype);
+  expect(Object.isFrozen(value)).toBe(true);
+}
+
+function restoreInheritedThen(descriptor: PropertyDescriptor | undefined): void {
+  if (descriptor === undefined) Reflect.deleteProperty(Object.prototype, THEN_PROPERTY);
+  else Object.defineProperty(Object.prototype, THEN_PROPERTY, descriptor);
+}
+
+function installInheritedThen(onGet: () => void, onCall: () => void): void {
+  Object.defineProperty(Object.prototype, THEN_PROPERTY, {
+    configurable: true,
+    get() {
+      onGet();
+      return (resolve: (value: unknown) => void) => {
+        onCall();
+        resolve("poisoned");
+      };
+    },
+  });
+}
+
+async function restoringInheritedThen<T>(operation: () => Promise<T>): Promise<T> {
+  const inherited = Object.getOwnPropertyDescriptor(Object.prototype, THEN_PROPERTY);
+  try {
+    return await operation();
+  } finally {
+    restoreInheritedThen(inherited);
+  }
+}
+
 describe("bounded inspected UTF-8 file reads", () => {
   it("reads the exact byte boundary, reports bytes, and freezes success", async () => {
     const bytes = Buffer.from("café", "utf8");
@@ -100,8 +141,8 @@ describe("bounded inspected UTF-8 file reads", () => {
       return true;
     });
 
-    expect(result).toEqual({ ok: true, text: "café", byteLength: bytes.length });
-    expect(Object.isFrozen(result)).toBe(true);
+    const expected = { ok: true, text: "café", byteLength: bytes.length };
+    expectAsyncResultRecord(result, expected);
     expect(checks).toBe(2);
   });
 
@@ -217,8 +258,8 @@ describe("bounded inspected UTF-8 file reads", () => {
           capabilities: { noFollow: false, nonBlock: false },
         },
       );
-      expect(result).toEqual({ ok: false, reason: "invalid-metadata" });
-      expect(Object.isFrozen(result)).toBe(true);
+      const expected = { ok: false, reason: "invalid-metadata" };
+      expectAsyncResultRecord(result, expected);
       expect(calls).toBe(0);
     },
   );
@@ -230,13 +271,12 @@ describe("bounded inspected UTF-8 file reads", () => {
       metadata: { ...inspected.metadata, size: 2n },
     } as InspectedFile;
     const result = await readInspectedUtf8File(oversized, 1, async () => false);
-    expect(result).toEqual({
+    expectAsyncResultRecord(result, {
       ok: false,
       reason: "changed",
       subject: "context",
       phase: "before-open",
     });
-    expect(Object.isFrozen(result)).toBe(true);
   });
 
   it("rejects invalid and oversized inspected metadata before opening", async () => {
@@ -362,22 +402,35 @@ describe("bounded inspected UTF-8 file reads", () => {
     expect(opened).toBe(false);
 
     let closes = 0;
-    const opening = await readInspectedUtf8File(
-      expected.inspected,
-      3,
-      async () => true,
-      ioFor(
-        expected.stats,
-        handleFor(replacement.stats, Buffer.from("abc"), { onClose: () => (closes += 1) }),
+    let getterCalls = 0;
+    let callableCalls = 0;
+    const opening = await restoringInheritedThen(() =>
+      readInspectedUtf8File(
+        expected.inspected,
+        3,
+        async () => true,
+        ioFor(
+          expected.stats,
+          handleFor(replacement.stats, Buffer.from("abc"), {
+            onClose: () => {
+              closes += 1;
+              installInheritedThen(
+                () => (getterCalls += 1),
+                () => (callableCalls += 1),
+              );
+            },
+          }),
+        ),
       ),
     );
-    expect(opening).toEqual({
+    expectAsyncResultRecord(opening, {
       ok: false,
       reason: "changed",
       subject: "file",
       phase: "opening",
     });
     expect(closes).toBe(1);
+    expect({ callableCalls, getterCalls }).toEqual({ callableCalls: 0, getterCalls: 0 });
   });
 
   it.runIf(HAS_NO_FOLLOW && HAS_NON_BLOCK)(
@@ -606,23 +659,32 @@ describe("bounded inspected UTF-8 file reads", () => {
   it("closes an opened handle exactly once for stat failures and successful reads", async () => {
     const { inspected, stats } = await inspectedFixture("close-once", "x");
     let failedCloses = 0;
-    const failed = await readInspectedUtf8File(inspected, 1, async () => true, {
-      lstatPath: async () => stats,
-      openFile: async () => ({
-        async stat() {
-          throw new Error("stat failed");
-        },
-        async read() {
-          return { bytesRead: 0 };
-        },
-        async close() {
-          failedCloses += 1;
-        },
+    let getterCalls = 0;
+    let callableCalls = 0;
+    const failed = await restoringInheritedThen(() =>
+      readInspectedUtf8File(inspected, 1, async () => true, {
+        lstatPath: async () => stats,
+        openFile: async () => ({
+          async stat() {
+            throw new Error("stat failed");
+          },
+          async read() {
+            return { bytesRead: 0 };
+          },
+          async close() {
+            failedCloses += 1;
+            installInheritedThen(
+              () => (getterCalls += 1),
+              () => (callableCalls += 1),
+            );
+          },
+        }),
+        capabilities: { noFollow: HAS_NO_FOLLOW, nonBlock: false },
       }),
-      capabilities: { noFollow: HAS_NO_FOLLOW, nonBlock: false },
-    });
-    expect(failed).toEqual({ ok: false, reason: "io" });
+    );
+    expectAsyncResultRecord(failed, { ok: false, reason: "io" });
     expect(failedCloses).toBe(1);
+    expect({ callableCalls, getterCalls }).toEqual({ callableCalls: 0, getterCalls: 0 });
 
     let successCloses = 0;
     const success = await readInspectedUtf8File(
@@ -639,5 +701,78 @@ describe("bounded inspected UTF-8 file reads", () => {
     );
     expect(success).toEqual({ ok: true, text: "x", byteLength: 1 });
     expect(successCloses).toBe(1);
+  });
+
+  it("blocks inherited callable then values on early failures without touching IO", async () => {
+    for (const mode of ["data", "getter"] as const) {
+      const inherited = Object.getOwnPropertyDescriptor(Object.prototype, THEN_PROPERTY);
+      let getterCalls = 0;
+      let callableCalls = 0;
+      let ioCalls = 0;
+      const callable = (resolve: (value: unknown) => void) => {
+        callableCalls += 1;
+        resolve("poisoned");
+      };
+      Object.defineProperty(Object.prototype, THEN_PROPERTY, {
+        configurable: true,
+        ...(mode === "data"
+          ? { value: callable }
+          : {
+              get: () => {
+                getterCalls += 1;
+                return callable;
+              },
+            }),
+      });
+      const touchIo = () => {
+        ioCalls += 1;
+        throw new Error("unexpected IO");
+      };
+      let result: Awaited<ReturnType<typeof readInspectedUtf8File>> | undefined;
+      try {
+        result = await readInspectedUtf8File({} as InspectedFile, -1, async () => touchIo(), {
+          lstatPath: async () => touchIo(),
+          openFile: async () => touchIo(),
+          capabilities: { noFollow: false, nonBlock: false },
+        });
+      } finally {
+        restoreInheritedThen(inherited);
+      }
+      if (result === undefined) throw new Error("missing file-read result");
+      expectAsyncResultRecord(result, { ok: false, reason: "invalid-metadata" });
+      expect({ callableCalls, getterCalls, ioCalls }).toEqual({
+        callableCalls: 0,
+        getterCalls: 0,
+        ioCalls: 0,
+      });
+    }
+  });
+
+  it("uses captured result intrinsics after live Reflect and Object pollution", async () => {
+    const objectConstructor = Object;
+    const apply = Reflect.apply;
+    const defineProperty = Object.defineProperty;
+    const freeze = Object.freeze;
+    let poisonCalls = 0;
+    const poison = () => {
+      poisonCalls += 1;
+      throw new Error("live intrinsic used");
+    };
+    let result: Awaited<ReturnType<typeof readInspectedUtf8File>> | undefined;
+    try {
+      Reflect.apply = poison as typeof Reflect.apply;
+      objectConstructor.defineProperty = poison as typeof Object.defineProperty;
+      objectConstructor.freeze = poison as typeof Object.freeze;
+      globalThis.Object = poison as unknown as ObjectConstructor;
+      result = await readInspectedUtf8File({} as InspectedFile, -1, async () => true);
+    } finally {
+      globalThis.Object = objectConstructor;
+      objectConstructor.defineProperty = defineProperty;
+      objectConstructor.freeze = freeze;
+      Reflect.apply = apply;
+    }
+    if (result === undefined) throw new Error("missing file-read result");
+    expectAsyncResultRecord(result, { ok: false, reason: "invalid-metadata" });
+    expect(poisonCalls).toBe(0);
   });
 });
