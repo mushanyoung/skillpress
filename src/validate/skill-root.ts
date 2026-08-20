@@ -1,6 +1,6 @@
 import type { BigIntStats } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
-import { join, parse, relative, resolve, sep } from "node:path";
+import { parse, relative, resolve, sep } from "node:path";
 
 import { MAX_PATH_COMPONENTS } from "../path-safety.js";
 import type { DiagnosticCollector } from "./diagnostics.js";
@@ -28,11 +28,52 @@ export interface RootInspectionIo {
   readonly realpathPath: (path: string) => Promise<string>;
 }
 
+// Module initialization is the trust boundary for the provenance intrinsics below.
+const lstatSnapshot = lstat;
+const parseSnapshot = parse;
+const realpathSnapshot = realpath;
+const relativeSnapshot = relative;
+const resolveSnapshot = resolve;
+const separatorSnapshot = sep;
+
 const DEFAULT_IO: RootInspectionIo = {
-  resolvePath: resolve,
-  lstatPath: (path) => lstat(path, { bigint: true }),
-  realpathPath: realpath,
+  resolvePath: resolveSnapshot,
+  lstatPath: (path) => lstatSnapshot(path, { bigint: true }),
+  realpathPath: realpathSnapshot,
 };
+
+const applySnapshot = Reflect.apply;
+const definePropertySnapshot = Object.defineProperty;
+const freezeSnapshot = Object.freeze;
+const splitSnapshot = String.prototype.split;
+const weakSetAddSnapshot = WeakSet.prototype.add;
+const weakSetHasSnapshot = WeakSet.prototype.has;
+const genuineRootInspections = new WeakSet<object>();
+
+function registerRootInspection(root: RootInspection): RootInspection {
+  applySnapshot(weakSetAddSnapshot, genuineRootInspections, [root]);
+  return root;
+}
+
+function appendOwnDataSlot<T>(values: T[], value: T): void {
+  applySnapshot(definePropertySnapshot, Object, [
+    values,
+    values.length,
+    { configurable: true, enumerable: true, value, writable: true },
+  ]);
+}
+
+function splitPath(value: string): string[] {
+  return applySnapshot(splitSnapshot, value, [separatorSnapshot]) as string[];
+}
+
+/** @internal Accept only identities completed by this module; no properties are inspected. */
+export function isGenuineRootInspection(value: unknown): value is RootInspection {
+  if ((typeof value !== "object" && typeof value !== "function") || value === null) {
+    return false;
+  }
+  return applySnapshot(weakSetHasSnapshot, genuineRootInspections, [value]) as boolean;
+}
 
 function isMissing(error: unknown): boolean {
   try {
@@ -47,7 +88,8 @@ async function pathComponentsAreCurrent(
   lstatPath: RootInspectionIo["lstatPath"],
 ): Promise<boolean> {
   try {
-    for (const component of components) {
+    for (let index = 0; index < components.length; index += 1) {
+      const component = components[index] as PathComponentInspection;
       const current = snapshotFileMetadata(await lstatPath(component.path));
       if (!sameFileIdentity(component.metadata, current) || current.kind !== "directory") {
         return false;
@@ -82,9 +124,18 @@ export async function inspectAgentSkillRoot(
   let filesystemRoot: string;
   let names: string[];
   try {
-    absolutePath = io.resolvePath(directory);
-    filesystemRoot = parse(absolutePath).root;
-    names = relative(filesystemRoot, absolutePath).split(sep).filter(Boolean);
+    const resolvedPath: unknown = io.resolvePath(directory);
+    if (typeof resolvedPath !== "string") throw new TypeError("resolved path must be a string");
+    absolutePath = resolvedPath;
+    filesystemRoot = parseSnapshot(absolutePath).root;
+    const pathParts = splitPath(relativeSnapshot(filesystemRoot, absolutePath));
+    names = [];
+    for (let index = 0; index < pathParts.length; index += 1) {
+      const name = pathParts[index];
+      if (name !== undefined && name !== "") {
+        appendOwnDataSlot(names, name);
+      }
+    }
   } catch {
     diagnostics.add(
       "skill.document.read",
@@ -108,9 +159,13 @@ export async function inspectAgentSkillRoot(
   const components: PathComponentInspection[] = [];
   let currentPath = filesystemRoot;
   try {
-    for (const name of ["", ...names]) {
-      if (name !== "") currentPath = join(currentPath, name);
-      const metadata = snapshotFileMetadata(await io.lstatPath(currentPath));
+    for (let index = 0; index <= names.length; index += 1) {
+      const name = index === 0 ? "" : (names[index - 1] as string);
+      if (name !== "") {
+        currentPath =
+          index === 1 ? `${filesystemRoot}${name}` : `${currentPath}${separatorSnapshot}${name}`;
+      }
+      const metadata = freezeSnapshot(snapshotFileMetadata(await io.lstatPath(currentPath)));
       if (metadata.kind === "symbolic-link") {
         diagnostics.add(
           "skill.root.symlink",
@@ -131,7 +186,7 @@ export async function inspectAgentSkillRoot(
         );
         return undefined;
       }
-      components.push(Object.freeze({ path: currentPath, metadata }));
+      appendOwnDataSlot(components, freezeSnapshot({ path: currentPath, metadata }));
     }
   } catch (error) {
     const missing = isMissing(error);
@@ -147,12 +202,17 @@ export async function inspectAgentSkillRoot(
   const metadata = (components[components.length - 1] as PathComponentInspection).metadata;
   let canonicalPath: string;
   try {
-    canonicalPath = await io.realpathPath(absolutePath);
+    const resolvedCanonicalPath: unknown = await io.realpathPath(absolutePath);
+    if (typeof resolvedCanonicalPath !== "string") {
+      throw new TypeError("canonical path must be a string");
+    }
+    canonicalPath = resolvedCanonicalPath;
     const canonical = snapshotFileMetadata(await io.lstatPath(canonicalPath));
-    const current = Object.freeze({
+    const frozenComponents = freezeSnapshot(components);
+    const current = freezeSnapshot({
       path: absolutePath,
       canonicalPath,
-      components: Object.freeze([...components]),
+      components: frozenComponents,
       metadata,
     });
     if (!sameFileIdentity(metadata, canonical) || !(await rootInspectionIsCurrent(current, io))) {
@@ -165,7 +225,7 @@ export async function inspectAgentSkillRoot(
       );
       return undefined;
     }
-    return current;
+    return registerRootInspection(current);
   } catch {
     diagnostics.add(
       "skill.document.read",

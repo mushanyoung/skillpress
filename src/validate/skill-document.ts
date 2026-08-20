@@ -7,6 +7,7 @@ import { snapshotFileMetadata } from "./file-metadata.js";
 import { type DocumentInspection, readInspectedAgentSkillDocument } from "./skill-document-read.js";
 import {
   inspectAgentSkillRoot,
+  isGenuineRootInspection,
   type RootInspection,
   rootInspectionIsCurrent,
 } from "./skill-root.js";
@@ -31,17 +32,52 @@ export interface DocumentInspectionIo {
   readonly rootIsCurrent: (root: RootInspection) => Promise<boolean>;
 }
 
+// Module initialization is the trust boundary for the provenance intrinsics below.
+const basenameSnapshot = basename;
+const joinSnapshot = join;
+const lstatSnapshot = lstat;
+const opendirSnapshot = opendir;
+
 const DEFAULT_IO: DocumentInspectionIo = {
-  openDirectory: opendir,
-  lstatPath: (path) => lstat(path, { bigint: true }),
+  openDirectory: opendirSnapshot,
+  lstatPath: (path) => lstatSnapshot(path, { bigint: true }),
   rootIsCurrent: rootInspectionIsCurrent,
 };
+
+const applySnapshot = Reflect.apply;
+const freezeSnapshot = Object.freeze;
+const weakSetAddSnapshot = WeakSet.prototype.add;
+const weakSetHasSnapshot = WeakSet.prototype.has;
+const genuineDocumentInspections = new WeakSet<object>();
+
+function registerDocumentInspection(document: DocumentInspection): DocumentInspection {
+  applySnapshot(weakSetAddSnapshot, genuineDocumentInspections, [document]);
+  return document;
+}
+
+/** @internal Accept only identities completed by this module; no properties are inspected. */
+export function isGenuineDocumentInspection(value: unknown): value is DocumentInspection {
+  if ((typeof value !== "object" && typeof value !== "function") || value === null) {
+    return false;
+  }
+  return applySnapshot(weakSetHasSnapshot, genuineDocumentInspections, [value]) as boolean;
+}
 
 export async function inspectAgentSkillDocument(
   root: RootInspection,
   diagnostics: DiagnosticCollector,
   io: DocumentInspectionIo = DEFAULT_IO,
 ): Promise<DocumentInspection | undefined> {
+  if (!isGenuineRootInspection(root)) {
+    diagnostics.add(
+      "skill.root.changed",
+      "error",
+      "skillpress",
+      "skill directory changed while it was being read",
+      { file: "." },
+    );
+    return undefined;
+  }
   let directory: SkillDirectoryHandle | undefined;
   let exact = false;
   let wrongCase = false;
@@ -110,10 +146,10 @@ export async function inspectAgentSkillDocument(
     );
     return undefined;
   }
-  const path = join(root.path, SKILL_DOCUMENT_NAME);
+  const path = joinSnapshot(root.path, SKILL_DOCUMENT_NAME);
   let metadata: DocumentInspection["metadata"];
   try {
-    metadata = snapshotFileMetadata(await io.lstatPath(path));
+    metadata = freezeSnapshot(snapshotFileMetadata(await io.lstatPath(path)));
   } catch {
     diagnostics.add("skill.document.read", "error", "skillpress", "SKILL.md cannot be inspected");
     return undefined;
@@ -146,7 +182,7 @@ export async function inspectAgentSkillDocument(
     );
     return undefined;
   }
-  return Object.freeze({ root, path, metadata });
+  return registerDocumentInspection(freezeSnapshot({ root, path, metadata }));
 }
 
 export async function loadAgentSkillDocument(
@@ -164,7 +200,7 @@ export async function loadAgentSkillDocument(
   }
   return Object.freeze({
     text: result.text,
-    directoryName: basename(document.root.canonicalPath),
+    directoryName: basenameSnapshot(document.root.canonicalPath),
     inspection: document,
   });
 }

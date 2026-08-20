@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { symlinkSync } from "node:fs";
+import { type BigIntStats, symlinkSync } from "node:fs";
 import { lstat, realpath, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,7 +8,11 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DiagnosticCollector } from "../src/validate/diagnostics.js";
-import { inspectAgentSkillRoot, rootInspectionIsCurrent } from "../src/validate/skill-root.js";
+import {
+  inspectAgentSkillRoot,
+  isGenuineRootInspection,
+  rootInspectionIsCurrent,
+} from "../src/validate/skill-root.js";
 import { createSkillFixtures, skillDocument } from "./helpers/skill-fixtures.js";
 
 const fixtures = createSkillFixtures();
@@ -17,6 +21,48 @@ afterEach(() => fixtures.cleanup());
 
 function codes(diagnostics: DiagnosticCollector): string[] {
   return diagnostics.finish().diagnostics.map((entry) => entry.code);
+}
+
+async function withPropertyReplacement<T>(
+  target: object,
+  property: PropertyKey,
+  value: unknown,
+  run: () => T | Promise<T>,
+): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(target, property);
+  Object.defineProperty(target, property, {
+    configurable: true,
+    value,
+    writable: true,
+  });
+  try {
+    return await run();
+  } finally {
+    if (descriptor === undefined) {
+      Reflect.deleteProperty(target, property);
+    } else {
+      Object.defineProperty(target, property, descriptor);
+    }
+  }
+}
+
+async function withPropertyDescriptor<T>(
+  target: object,
+  property: PropertyKey,
+  descriptor: PropertyDescriptor,
+  run: () => T | Promise<T>,
+): Promise<T> {
+  const previous = Object.getOwnPropertyDescriptor(target, property);
+  Object.defineProperty(target, property, descriptor);
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(target, property);
+    } else {
+      Object.defineProperty(target, property, previous);
+    }
+  }
 }
 
 describe("Agent Skill root inspection", () => {
@@ -108,6 +154,51 @@ describe("Agent Skill root inspection", () => {
     expect(codes(filesystem)).toEqual(["skill.document.read"]);
   });
 
+  it("rejects non-string resolved paths before authority registration", async () => {
+    const fixture = await fixtures.skill(
+      "root-path-shape",
+      skillDocument("name: root-path-shape\ndescription: A description."),
+    );
+    const resolvedObject = { path: fixture.directory };
+    const resolvedCalls = { lstat: 0, realpath: 0 };
+    const resolvedDiagnostics = new DiagnosticCollector();
+    const resolvedRoot = await inspectAgentSkillRoot("ignored", resolvedDiagnostics, {
+      resolvePath: () => resolvedObject as unknown as string,
+      async lstatPath() {
+        resolvedCalls.lstat += 1;
+        return lstat(fixture.directory, { bigint: true });
+      },
+      async realpathPath() {
+        resolvedCalls.realpath += 1;
+        return fixture.directory;
+      },
+    });
+    expect(resolvedRoot).toBeUndefined();
+    expect(codes(resolvedDiagnostics)).toEqual(["skill.document.read"]);
+    expect(resolvedCalls).toEqual({ lstat: 0, realpath: 0 });
+    expect(isGenuineRootInspection(resolvedObject)).toBe(false);
+
+    const metadata = await lstat(fixture.directory, { bigint: true });
+    const canonicalObject = { path: fixture.directory };
+    let canonicalCalls = 0;
+    const canonicalDiagnostics = new DiagnosticCollector();
+    const canonicalRoot = await inspectAgentSkillRoot(fixture.directory, canonicalDiagnostics, {
+      resolvePath: () => fixture.directory,
+      async lstatPath() {
+        return metadata;
+      },
+      async realpathPath() {
+        canonicalCalls += 1;
+        return canonicalObject as unknown as string;
+      },
+    });
+    expect(canonicalRoot).toBeUndefined();
+    expect(codes(canonicalDiagnostics)).toEqual(["skill.document.read"]);
+    expect(canonicalCalls).toBe(1);
+    expect(Object.isFrozen(canonicalObject)).toBe(false);
+    expect(isGenuineRootInspection(canonicalObject)).toBe(false);
+  });
+
   it("rejects canonical identity changes and canonicalization failures", async () => {
     const fixture = await fixtures.skill(
       "root-change",
@@ -175,6 +266,181 @@ describe("Agent Skill root inspection", () => {
         lstatPath: (path) => lstat(path, { bigint: true }),
       }),
     ).toBe(false);
+  });
+
+  it("authenticates only completed root inspection identities without property reads", async () => {
+    const fixture = await fixtures.skill(
+      "root-provenance",
+      skillDocument("name: root-provenance\ndescription: A description."),
+    );
+    const diagnostics = new DiagnosticCollector();
+    const root = await inspectAgentSkillRoot(fixture.directory, diagnostics);
+    expect(codes(diagnostics)).toEqual([]);
+    expect(root).toBeDefined();
+    if (root === undefined) return;
+    expect(isGenuineRootInspection(root)).toBe(true);
+
+    let trapCalls = 0;
+    const forged = Object.create(null) as object;
+    Object.defineProperty(forged, "path", {
+      get() {
+        trapCalls += 1;
+        throw new Error("forged root was inspected");
+      },
+    });
+    const proxy = new Proxy(root, {
+      get() {
+        trapCalls += 1;
+        throw new Error("genuine root proxy was inspected");
+      },
+    });
+    const revoked = Proxy.revocable(root, {
+      get() {
+        trapCalls += 1;
+        throw new Error("revoked root proxy was inspected");
+      },
+    });
+    revoked.revoke();
+    for (const candidate of [
+      undefined,
+      null,
+      7,
+      () => undefined,
+      { ...root },
+      Object.create(root) as object,
+      forged,
+      proxy,
+      revoked.proxy,
+    ]) {
+      expect(isGenuineRootInspection(candidate)).toBe(false);
+    }
+    expect(trapCalls).toBe(0);
+
+    const structural = { ...root };
+    expect(
+      await rootInspectionIsCurrent(structural, {
+        resolvePath: (path) => path,
+        lstatPath: (path) => lstat(path, { bigint: true }),
+        realpathPath: async () => root.canonicalPath,
+      }),
+    ).toBe(true);
+
+    const addPollutedDiagnostics = new DiagnosticCollector();
+    const addPolluted = await withPropertyReplacement(
+      WeakSet.prototype,
+      "add",
+      () => {
+        throw new Error("live WeakSet.add was used");
+      },
+      () => inspectAgentSkillRoot(fixture.directory, addPollutedDiagnostics),
+    );
+    expect(codes(addPollutedDiagnostics)).toEqual([]);
+    expect(addPolluted).toBeDefined();
+    expect(isGenuineRootInspection(addPolluted)).toBe(true);
+    expect(
+      await withPropertyReplacement(
+        WeakSet.prototype,
+        "has",
+        () => {
+          throw new Error("live WeakSet.has was used");
+        },
+        () => isGenuineRootInspection(root),
+      ),
+    ).toBe(true);
+    expect(
+      await withPropertyReplacement(
+        Reflect,
+        "apply",
+        () => {
+          throw new Error("live Reflect.apply was used");
+        },
+        () => isGenuineRootInspection(root),
+      ),
+    ).toBe(true);
+  });
+
+  it("constructs and revalidates the complete ancestor chain without live array protocols", async () => {
+    const fixture = await fixtures.skill(
+      "root-array-provenance",
+      skillDocument("name: root-array-provenance\ndescription: A description."),
+    );
+    const setup = new DiagnosticCollector();
+    const baseline = await inspectAgentSkillRoot(fixture.directory, setup);
+    expect(codes(setup)).toEqual([]);
+    expect(baseline).toBeDefined();
+    if (baseline === undefined) return;
+
+    const expectedPaths = baseline.components.map((component) => component.path);
+    const metadataByPath = new Map<string, BigIntStats>();
+    for (const path of expectedPaths) {
+      metadataByPath.set(path, await lstat(path, { bigint: true }));
+    }
+    const canonicalMetadata = await lstat(baseline.canonicalPath, { bigint: true });
+    let forbiddenCalls = 0;
+    let numericSetterCalls = 0;
+    let currentChecks = 0;
+    const throwing = () => {
+      forbiddenCalls += 1;
+      throw new Error("live array or string protocol was used");
+    };
+
+    const result = await withPropertyReplacement(Array.prototype, "push", throwing, () =>
+      withPropertyReplacement(Array.prototype, "filter", throwing, () =>
+        withPropertyReplacement(Array.prototype, Symbol.iterator, throwing, () =>
+          withPropertyReplacement(String.prototype, "split", throwing, () =>
+            withPropertyDescriptor(
+              Array.prototype,
+              "0",
+              {
+                configurable: true,
+                set() {
+                  numericSetterCalls += 1;
+                  throw new Error("inherited numeric setter was used");
+                },
+              },
+              async () => {
+                const diagnostics = new DiagnosticCollector();
+                const root = await inspectAgentSkillRoot(fixture.directory, diagnostics, {
+                  resolvePath: () => baseline.path,
+                  async lstatPath(path) {
+                    const metadata =
+                      metadataByPath.get(path) ??
+                      (path === baseline.canonicalPath ? canonicalMetadata : undefined);
+                    if (metadata === undefined) throw new Error("unexpected component path");
+                    return metadata;
+                  },
+                  realpathPath: async () => baseline.canonicalPath,
+                });
+                const current =
+                  root !== undefined &&
+                  (await rootInspectionIsCurrent(root, {
+                    resolvePath: (path) => path,
+                    async lstatPath(path) {
+                      currentChecks += 1;
+                      const metadata = metadataByPath.get(path);
+                      if (metadata === undefined) throw new Error("unexpected freshness path");
+                      return metadata;
+                    },
+                    realpathPath: async () => baseline.canonicalPath,
+                  }));
+                return { current, diagnostics, root };
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(codes(result.diagnostics)).toEqual([]);
+    expect(result.root).toBeDefined();
+    if (result.root === undefined) return;
+    expect(result.current).toBe(true);
+    expect(isGenuineRootInspection(result.root)).toBe(true);
+    expect(result.root.components.map((component) => component.path)).toEqual(expectedPaths);
+    expect(result.root.components).toHaveLength(expectedPaths.length);
+    expect(currentChecks).toBe(expectedPaths.length);
+    expect(forbiddenCalls).toBe(0);
+    expect(numericSetterCalls).toBe(0);
   });
 
   it("normalizes hostile filesystem metadata getters", async () => {
