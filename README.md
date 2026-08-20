@@ -44,11 +44,13 @@ import { validateAgentSkill } from "@mushanyoung/skillpress";
 const report = await validateAgentSkill("./skills/my-skill", { expectedName: "my-skill" });
 ```
 
-Validation reads a bounded, regular `SKILL.md` without executing it. It enforces portable Agent
-Skills frontmatter, canonical path spelling, deterministic diagnostics, and safe metadata. An
-`ok: true` report may still contain portability or target-specific warnings; it is not a readiness
-score, an evaluation result, or a publication receipt. Markdown reference traversal is introduced
-by the next validator slice.
+Validation creates a bounded resource-tree observation and rechecks it before publishing a result,
+without executing the skill. It recursively analyzes only local Markdown files reached by
+CommonMark links; local images and non-Markdown links are existence-checked, while code spans, bare
+paths, and raw HTML are not followed. External URLs are not fetched, and fragment anchors are not
+validated. Missing, unsafe, ambiguous, unreadable, or over-budget resources produce deterministic
+errors. An `ok: true` report may still contain portability or target-specific warnings; it is not a
+readiness score, an evaluation result, or a publication receipt.
 
 SkillPress distinguishes local readiness from Tessl's official Quality and Impact scores. It will
 only report the latter when current Tessl evidence exists, and the release profile defaults to a

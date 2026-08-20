@@ -1,8 +1,19 @@
+import { basename } from "node:path";
+
 import { isSafePathInput } from "../path-safety.js";
 import { DiagnosticCollector } from "./diagnostics.js";
 import { parseAgentSkillFrontmatter } from "./frontmatter.js";
+import {
+  buildInspectedMarkdownResourceGraph,
+  type MarkdownResourceGraph,
+} from "./markdown-resource-graph.js";
+import {
+  addMarkdownResourceGraphFailureDiagnostic,
+  addMarkdownResourceGraphFindingDiagnostics,
+} from "./markdown-resource-diagnostics.js";
 import { validateSupplementalMetadata } from "./metadata-rules.js";
-import { loadAgentSkillDocument } from "./skill-document.js";
+import { inspectAgentSkillDocument } from "./skill-document.js";
+import { inspectAgentSkillRoot } from "./skill-root.js";
 import type {
   AgentSkillMetadata,
   AgentSkillValidationOptions,
@@ -15,6 +26,11 @@ import type {
 const PORTABLE_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const MAX_NAME_CODE_POINTS = 64;
 const MAX_DESCRIPTION_CODE_POINTS = 1024;
+const basenameSnapshot = basename;
+const buildGraphSnapshot = buildInspectedMarkdownResourceGraph;
+const inspectDocumentSnapshot = inspectAgentSkillDocument;
+const inspectRootSnapshot = inspectAgentSkillRoot;
+const objectGetOwnPropertyDescriptorSnapshot = Object.getOwnPropertyDescriptor;
 
 function error(
   diagnostics: DiagnosticCollector,
@@ -173,8 +189,15 @@ function readExpectedName(options: AgentSkillValidationOptions | undefined): str
   return value;
 }
 
+function ownGraph(value: object): MarkdownResourceGraph | undefined {
+  const descriptor = objectGetOwnPropertyDescriptorSnapshot(value, "graph");
+  if (descriptor === undefined) return undefined;
+  const valueDescriptor = objectGetOwnPropertyDescriptorSnapshot(descriptor, "value");
+  return valueDescriptor?.value as MarkdownResourceGraph | undefined;
+}
+
 /**
- * Validate one canonical Agent Skill without executing its instructions or following references.
+ * Validate one canonical Agent Skill without executing its instructions or fetching external URLs.
  * Throws TypeError only for malformed API arguments; skill findings are returned as diagnostics.
  */
 export async function validateAgentSkill(
@@ -186,11 +209,22 @@ export async function validateAgentSkill(
   }
   const expectedName = readExpectedName(options);
   const diagnostics = new DiagnosticCollector();
-  const loaded = await loadAgentSkillDocument(skillDirectory, diagnostics);
-  if (loaded === undefined) return diagnostics.finish();
-  const parsed = parseAgentSkillFrontmatter(loaded.text, diagnostics);
-  if (parsed === undefined) return diagnostics.finish();
-  return diagnostics.finish(
-    validateFields(parsed, loaded.directoryName, expectedName, diagnostics),
-  );
+  const root = await inspectRootSnapshot(skillDirectory, diagnostics);
+  if (root === undefined) return diagnostics.finish();
+  const document = await inspectDocumentSnapshot(root, diagnostics);
+  if (document === undefined) return diagnostics.finish();
+  const directoryName = basenameSnapshot(root.canonicalPath);
+  const graphed = await buildGraphSnapshot(document);
+  if (!graphed.ok) {
+    addMarkdownResourceGraphFailureDiagnostic(diagnostics, graphed.reason);
+    return diagnostics.finish();
+  }
+  const parsed = parseAgentSkillFrontmatter(graphed.documentText, diagnostics);
+  const metadata =
+    parsed === undefined
+      ? undefined
+      : validateFields(parsed, directoryName, expectedName, diagnostics);
+  const graph = ownGraph(graphed);
+  if (graph !== undefined) addMarkdownResourceGraphFindingDiagnostics(diagnostics, graph);
+  return diagnostics.finish(metadata);
 }
