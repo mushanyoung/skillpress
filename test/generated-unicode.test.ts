@@ -15,6 +15,29 @@ const CODE_POINT_COUNT = MAX_CODE_POINT + 1;
 const SURROGATE_START = 0xd800;
 const SURROGATE_END = 0xdfff;
 
+function withPropertyReplacement<T>(
+  target: object,
+  property: PropertyKey,
+  value: unknown,
+  run: () => T,
+): T {
+  const descriptor = Object.getOwnPropertyDescriptor(target, property);
+  Object.defineProperty(target, property, {
+    configurable: true,
+    value,
+    writable: true,
+  });
+  try {
+    return run();
+  } finally {
+    if (descriptor === undefined) {
+      Reflect.deleteProperty(target, property);
+    } else {
+      Object.defineProperty(target, property, descriptor);
+    }
+  }
+}
+
 async function readUnicodeSource(file: string): Promise<string> {
   return readFile(new URL(`vendor/unicode/15.1.0/${file}`, repositoryRoot), "utf8");
 }
@@ -102,6 +125,7 @@ describe("generated Unicode 15.1 portability tables", () => {
     expect(fullCaseFoldUnicode15_1("Āā")).toBe("āā");
     expect(fullCaseFoldUnicode15_1("🙂")).toBe("🙂");
     expect(fullCaseFoldUnicode15_1("\ud800")).toBe("\ud800");
+    expect(fullCaseFoldUnicode15_1("\ud800A")).toBe("\ud800a");
     expect(fullCaseFoldUnicode15_1("")).toBe("");
   });
 
@@ -123,6 +147,79 @@ describe("generated Unicode 15.1 portability tables", () => {
     ]) {
       expect(isAssignedScalarUnicode15_1(invalid)).toBe(false);
     }
+  });
+
+  it("uses intrinsic snapshots after module initialization", () => {
+    const input = "Ā🙂\ud800";
+    const expected = "ā🙂\ud800";
+
+    const throwingArrayIteratorResult = withPropertyReplacement(
+      Array.prototype,
+      Symbol.iterator,
+      () => {
+        throw new Error("array iterator was used");
+      },
+      () => ({
+        assigned: isAssignedScalarUnicode15_1(0x41),
+        folded: fullCaseFoldUnicode15_1(input),
+      }),
+    );
+    expect(throwingArrayIteratorResult).toEqual({ assigned: true, folded: expected });
+
+    const emptyArrayIteratorResult = withPropertyReplacement(
+      Array.prototype,
+      Symbol.iterator,
+      () => ({ next: () => ({ done: true, value: undefined }) }),
+      () => ({
+        assigned: isAssignedScalarUnicode15_1(0x41),
+        folded: fullCaseFoldUnicode15_1(input),
+      }),
+    );
+    expect(emptyArrayIteratorResult).toEqual({ assigned: true, folded: expected });
+
+    const iteratorResult = withPropertyReplacement(
+      String.prototype,
+      Symbol.iterator,
+      () => {
+        throw new Error("iterator was used");
+      },
+      () => fullCaseFoldUnicode15_1(input),
+    );
+    expect(iteratorResult).toBe(expected);
+
+    const codePointAtResult = withPropertyReplacement(
+      String.prototype,
+      "codePointAt",
+      () => 0x41,
+      () => fullCaseFoldUnicode15_1(input),
+    );
+    expect(codePointAtResult).toBe(expected);
+
+    const fromCodePointResult = withPropertyReplacement(
+      String,
+      "fromCodePoint",
+      () => "polluted",
+      () => fullCaseFoldUnicode15_1(input),
+    );
+    expect(fromCodePointResult).toBe(expected);
+
+    const applyResult = withPropertyReplacement(
+      Reflect,
+      "apply",
+      () => {
+        throw new Error("live Reflect.apply was used");
+      },
+      () => fullCaseFoldUnicode15_1(input),
+    );
+    expect(applyResult).toBe(expected);
+
+    const integerResult = withPropertyReplacement(
+      Number,
+      "isInteger",
+      () => false,
+      () => isAssignedScalarUnicode15_1(0x41),
+    );
+    expect(integerResult).toBe(true);
   });
 
   it("matches independent UCD oracles for every code point and locks semantic digests", async () => {
@@ -245,5 +342,12 @@ describe("generated Unicode 15.1 portability tables", () => {
         expect(source).not.toContain(fragment);
       }
     }
+    expect(generatedSource).not.toContain(".codePointAt(");
+    expect(generatedSource).not.toContain("for (const character of value)");
+    expect(generatedSource).not.toContain("Math.floor");
+    expect(generatedSource).not.toContain("[Symbol.iterator]");
+    expect(generatedSource).not.toMatch(/\bfor\s*\([^)]*\bof\b/gu);
+    expect(generatedSource).not.toContain("const [source, mapping]");
+    expect(generatedSource).not.toContain("const [start, end");
   });
 });
