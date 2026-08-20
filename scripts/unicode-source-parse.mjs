@@ -21,6 +21,12 @@ const inputs = {
     sha256: "04e16379344bdb9973cdb6f6bf0a5dd66f7cd41b014cd9f79d848768ae757256",
     header: "# DerivedAge-15.1.0.txt",
   },
+  derivedCoreProperties: {
+    path: "vendor/unicode/15.1.0/DerivedCoreProperties.txt",
+    bytes: 1_072_686,
+    sha256: "f55d0db69123431a7317868725b1fcbf1eab6b265d756d1bd7f0f6d9f9ee108b",
+    header: "# DerivedCoreProperties-15.1.0.txt",
+  },
 };
 
 const caseFoldingRecordPattern =
@@ -91,11 +97,12 @@ async function readPinnedInput(input) {
 }
 
 export async function readPinnedUnicodeInputs() {
-  const [caseFoldingLines, derivedAgeLines] = await Promise.all([
+  const [caseFoldingLines, derivedAgeLines, derivedCorePropertiesLines] = await Promise.all([
     readPinnedInput(inputs.caseFolding),
     readPinnedInput(inputs.derivedAge),
+    readPinnedInput(inputs.derivedCoreProperties),
   ]);
-  return { caseFoldingLines, derivedAgeLines };
+  return { caseFoldingLines, derivedAgeLines, derivedCorePropertiesLines };
 }
 
 export function parseCaseFolding(lines) {

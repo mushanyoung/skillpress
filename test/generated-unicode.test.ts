@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   fullCaseFoldUnicode15_1,
   isAssignedScalarUnicode15_1,
+  isDefaultIgnorableCodePointUnicode15_1,
   UNICODE_PORTABILITY_VERSION,
 } from "../src/validate/generated-unicode.js";
 
@@ -107,6 +108,67 @@ function parseAssignedScalarOracle(source: string): Uint8Array {
   return assigned;
 }
 
+function parseDefaultIgnorableOracle(source: string): {
+  readonly bitmap: Uint8Array;
+  readonly recordCount: number;
+} {
+  const bitmap = new Uint8Array(CODE_POINT_COUNT);
+  let recordCount = 0;
+  for (const line of source.split("\n")) {
+    const data = line.split("#")[0]?.trim();
+    if (!data) {
+      continue;
+    }
+
+    const fields = data.split(";").map((field) => field.trim());
+    if (fields.length !== 2 || fields[1] !== "Default_Ignorable_Code_Point") {
+      continue;
+    }
+    const rangeText = fields[0];
+    if (rangeText === undefined) {
+      continue;
+    }
+    const endpoints = rangeText.split("..");
+    const startText = endpoints[0];
+    const endText = endpoints[1] ?? startText;
+    if (startText === undefined || endText === undefined) {
+      continue;
+    }
+    const start = Number.parseInt(startText, 16);
+    const end = Number.parseInt(endText, 16);
+    bitmap.fill(1, start, end + 1);
+    recordCount += 1;
+  }
+  return { bitmap, recordCount };
+}
+
+function countSetRanges(bitmap: Uint8Array): number {
+  let count = 0;
+  let inside = false;
+  for (let codePoint = 0; codePoint < bitmap.length; codePoint += 1) {
+    if (bitmap[codePoint] === 1) {
+      if (!inside) {
+        count += 1;
+        inside = true;
+      }
+    } else {
+      inside = false;
+    }
+  }
+  return count;
+}
+
+function packBitset(bitmap: Uint8Array): Uint8Array {
+  const packed = new Uint8Array(Math.ceil(bitmap.length / 8));
+  for (let codePoint = 0; codePoint < bitmap.length; codePoint += 1) {
+    if (bitmap[codePoint] === 1) {
+      const byteIndex = codePoint >> 3;
+      packed[byteIndex] = (packed[byteIndex] ?? 0) | (1 << (codePoint & 7));
+    }
+  }
+  return packed;
+}
+
 function digest(content: Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
 }
@@ -149,6 +211,29 @@ describe("generated Unicode 15.1 portability tables", () => {
     }
   });
 
+  it("recognizes the complete Unicode 15.1 default-ignorable property", () => {
+    for (const codePoint of [0x00ad, 0x034f, 0x2064, 0x2065, 0xfff0, 0xe0000, 0xe0fff]) {
+      expect(isDefaultIgnorableCodePointUnicode15_1(codePoint)).toBe(true);
+    }
+    for (const codePoint of [0x0041, 0x205f, 0x2070, 0xe1000]) {
+      expect(isDefaultIgnorableCodePointUnicode15_1(codePoint)).toBe(false);
+    }
+    for (const invalid of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      -1,
+      1.5,
+      SURROGATE_START,
+      SURROGATE_END,
+      MAX_CODE_POINT + 1,
+    ]) {
+      expect(isDefaultIgnorableCodePointUnicode15_1(invalid)).toBe(false);
+    }
+
+    expect(isAssignedScalarUnicode15_1(0x2065)).toBe(false);
+    expect(isAssignedScalarUnicode15_1(0xe0000)).toBe(false);
+  });
+
   it("uses intrinsic snapshots after module initialization", () => {
     const input = "Ā🙂\ud800";
     const expected = "ā🙂\ud800";
@@ -161,10 +246,15 @@ describe("generated Unicode 15.1 portability tables", () => {
       },
       () => ({
         assigned: isAssignedScalarUnicode15_1(0x41),
+        defaultIgnorable: isDefaultIgnorableCodePointUnicode15_1(0x00ad),
         folded: fullCaseFoldUnicode15_1(input),
       }),
     );
-    expect(throwingArrayIteratorResult).toEqual({ assigned: true, folded: expected });
+    expect(throwingArrayIteratorResult).toEqual({
+      assigned: true,
+      defaultIgnorable: true,
+      folded: expected,
+    });
 
     const emptyArrayIteratorResult = withPropertyReplacement(
       Array.prototype,
@@ -172,10 +262,15 @@ describe("generated Unicode 15.1 portability tables", () => {
       () => ({ next: () => ({ done: true, value: undefined }) }),
       () => ({
         assigned: isAssignedScalarUnicode15_1(0x41),
+        defaultIgnorable: isDefaultIgnorableCodePointUnicode15_1(0x00ad),
         folded: fullCaseFoldUnicode15_1(input),
       }),
     );
-    expect(emptyArrayIteratorResult).toEqual({ assigned: true, folded: expected });
+    expect(emptyArrayIteratorResult).toEqual({
+      assigned: true,
+      defaultIgnorable: true,
+      folded: expected,
+    });
 
     const iteratorResult = withPropertyReplacement(
       String.prototype,
@@ -217,9 +312,12 @@ describe("generated Unicode 15.1 portability tables", () => {
       Number,
       "isInteger",
       () => false,
-      () => isAssignedScalarUnicode15_1(0x41),
+      () => ({
+        assigned: isAssignedScalarUnicode15_1(0x41),
+        defaultIgnorable: isDefaultIgnorableCodePointUnicode15_1(0x00ad),
+      }),
     );
-    expect(integerResult).toBe(true);
+    expect(integerResult).toEqual({ assigned: true, defaultIgnorable: true });
   });
 
   it("matches independent UCD oracles for every code point and locks semantic digests", async () => {
@@ -306,16 +404,88 @@ describe("generated Unicode 15.1 portability tables", () => {
     );
   }, 30_000);
 
+  it("matches the independent default-ignorable oracle for every code point", async () => {
+    const [derivedCorePropertiesSource, derivedAgeSource] = await Promise.all([
+      readUnicodeSource("DerivedCoreProperties.txt"),
+      readUnicodeSource("DerivedAge.txt"),
+    ]);
+    const defaultIgnorableOracle = parseDefaultIgnorableOracle(derivedCorePropertiesSource);
+    const assignedOracle = parseAssignedScalarOracle(derivedAgeSource);
+    const actualDefaultIgnorable = new Uint8Array(CODE_POINT_COUNT);
+    const actualAssignedDefaultIgnorable = new Uint8Array(CODE_POINT_COUNT);
+    let defaultIgnorableMismatchCount = 0;
+    let assignedDefaultIgnorableMismatchCount = 0;
+    let firstDefaultIgnorableMismatch:
+      | { readonly codePoint: number; readonly expected: boolean; readonly actual: boolean }
+      | undefined;
+    let firstAssignedDefaultIgnorableMismatch:
+      | { readonly codePoint: number; readonly expected: boolean; readonly actual: boolean }
+      | undefined;
+
+    for (let codePoint = 0; codePoint <= MAX_CODE_POINT; codePoint += 1) {
+      const expectedDefaultIgnorable = defaultIgnorableOracle.bitmap[codePoint] === 1;
+      const actualIsDefaultIgnorable = isDefaultIgnorableCodePointUnicode15_1(codePoint);
+      if (actualIsDefaultIgnorable !== expectedDefaultIgnorable) {
+        defaultIgnorableMismatchCount += 1;
+        firstDefaultIgnorableMismatch ??= {
+          codePoint,
+          expected: expectedDefaultIgnorable,
+          actual: actualIsDefaultIgnorable,
+        };
+      }
+      if (actualIsDefaultIgnorable) {
+        actualDefaultIgnorable[codePoint] = 1;
+      }
+
+      const expectedAssignedDefaultIgnorable =
+        expectedDefaultIgnorable && assignedOracle[codePoint] === 1;
+      const actualIsAssignedDefaultIgnorable =
+        actualIsDefaultIgnorable && isAssignedScalarUnicode15_1(codePoint);
+      if (actualIsAssignedDefaultIgnorable !== expectedAssignedDefaultIgnorable) {
+        assignedDefaultIgnorableMismatchCount += 1;
+        firstAssignedDefaultIgnorableMismatch ??= {
+          codePoint,
+          expected: expectedAssignedDefaultIgnorable,
+          actual: actualIsAssignedDefaultIgnorable,
+        };
+      }
+      if (actualIsAssignedDefaultIgnorable) {
+        actualAssignedDefaultIgnorable[codePoint] = 1;
+      }
+    }
+
+    expect(defaultIgnorableOracle.recordCount).toBe(27);
+    expect({ count: defaultIgnorableMismatchCount, first: firstDefaultIgnorableMismatch }).toEqual({
+      count: 0,
+      first: undefined,
+    });
+    expect(actualDefaultIgnorable.reduce((count, value) => count + value, 0)).toBe(4_174);
+    expect(countSetRanges(actualDefaultIgnorable)).toBe(17);
+    expect(digest(packBitset(actualDefaultIgnorable))).toBe(
+      "c8984091f29193139ea640ff7fc181d77f209fe34867cb0368af1f07f260a3bd",
+    );
+
+    expect({
+      count: assignedDefaultIgnorableMismatchCount,
+      first: firstAssignedDefaultIgnorableMismatch,
+    }).toEqual({ count: 0, first: undefined });
+    expect(actualAssignedDefaultIgnorable.reduce((count, value) => count + value, 0)).toBe(405);
+    expect(countSetRanges(actualAssignedDefaultIgnorable)).toBe(19);
+    expect(digest(packBitset(actualAssignedDefaultIgnorable))).toBe(
+      "47369767624770346e80491eece207fde8e876a257bdf676c0f92fc073773615",
+    );
+  }, 30_000);
+
   it("keeps generated declarations narrow and host Unicode operations out of generation", async () => {
     const declaration = await readFile(
       new URL("dist/validate/generated-unicode.d.ts", repositoryRoot),
       "utf8",
     );
     expect(declaration).toContain(
-      "export declare const UNICODE_PORTABILITY_VERSION: string;\nexport declare function fullCaseFoldUnicode15_1(value: string): string;\nexport declare function isAssignedScalarUnicode15_1(codePoint: number): boolean;",
+      "export declare const UNICODE_PORTABILITY_VERSION: string;\nexport declare function fullCaseFoldUnicode15_1(value: string): string;\nexport declare function isAssignedScalarUnicode15_1(codePoint: number): boolean;\nexport declare function isDefaultIgnorableCodePointUnicode15_1(codePoint: number): boolean;",
     );
-    expect(declaration).not.toMatch(/(?:ASSIGNED_SCALAR|CASE_FOLD_)/u);
-    expect(declaration.split("\n").length).toBeLessThanOrEqual(6);
+    expect(declaration).not.toMatch(/(?:ASSIGNED_SCALAR|CASE_FOLD_|DEFAULT_IGNORABLE_)/u);
+    expect(declaration.split("\n").length).toBeLessThanOrEqual(7);
 
     const scriptDirectory = new URL("scripts/", repositoryRoot);
     const unicodeScripts = (await readdir(scriptDirectory)).filter((file) =>

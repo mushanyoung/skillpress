@@ -3,6 +3,10 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parseDerivedAge } from "./unicode-age-table.mjs";
+import {
+  parseDefaultIgnorable,
+  verifyAssignedDefaultIgnorable,
+} from "./unicode-default-ignorable-table.mjs";
 import { compressCaseFolding, verifyCaseFolding } from "./unicode-fold-table.mjs";
 import { parseCaseFolding, readPinnedUnicodeInputs } from "./unicode-source-parse.mjs";
 import { renderGeneratedSource } from "./unicode-table-render.mjs";
@@ -10,12 +14,15 @@ import { renderGeneratedSource } from "./unicode-table-render.mjs";
 const GENERATED_PATH = "src/validate/generated-unicode.ts";
 
 async function generate(checkOnly) {
-  const { caseFoldingLines, derivedAgeLines } = await readPinnedUnicodeInputs();
+  const { caseFoldingLines, derivedAgeLines, derivedCorePropertiesLines } =
+    await readPinnedUnicodeInputs();
   const selectedCaseFolding = parseCaseFolding(caseFoldingLines);
   const assignedRanges = parseDerivedAge(derivedAgeLines);
+  const defaultIgnorableRanges = parseDefaultIgnorable(derivedCorePropertiesLines);
+  verifyAssignedDefaultIgnorable(defaultIgnorableRanges, assignedRanges);
   const compressed = compressCaseFolding(selectedCaseFolding);
   verifyCaseFolding(selectedCaseFolding, compressed);
-  const generated = renderGeneratedSource(assignedRanges, compressed);
+  const generated = renderGeneratedSource(assignedRanges, defaultIgnorableRanges, compressed);
   const outputPath = fileURLToPath(new URL(`../${GENERATED_PATH}`, import.meta.url));
 
   if (checkOnly) {

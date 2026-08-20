@@ -1,7 +1,7 @@
 /* Generated from Unicode Character Database 15.1.0 by
  * scripts/generate-unicode-tables.mjs. Do not edit by hand. */
 
-type AssignedRange = readonly [start: number, end: number];
+type CodePointRange = readonly [start: number, end: number];
 type FoldRange = readonly [start: number, end: number, stride: number, delta: number];
 type FoldException = readonly [codePoint: number, mapping: string];
 
@@ -12,7 +12,7 @@ const fromCodePointSnapshot = String.fromCodePoint;
 const numberIsIntegerSnapshot = Number.isInteger;
 const stringConstructorSnapshot = String;
 
-const ASSIGNED_SCALAR_RANGES: readonly AssignedRange[] = [
+const ASSIGNED_SCALAR_RANGES: readonly CodePointRange[] = [
   [0x0, 0x377],
   [0x37a, 0x37f],
   [0x384, 0x38a],
@@ -730,6 +730,26 @@ const ASSIGNED_SCALAR_RANGES: readonly AssignedRange[] = [
   [0xefffe, 0x10ffff],
 ];
 
+const DEFAULT_IGNORABLE_CODE_POINT_RANGES: readonly CodePointRange[] = [
+  [0xad, 0xad],
+  [0x34f, 0x34f],
+  [0x61c, 0x61c],
+  [0x115f, 0x1160],
+  [0x17b4, 0x17b5],
+  [0x180b, 0x180f],
+  [0x200b, 0x200f],
+  [0x202a, 0x202e],
+  [0x2060, 0x206f],
+  [0x3164, 0x3164],
+  [0xfe00, 0xfe0f],
+  [0xfeff, 0xfeff],
+  [0xffa0, 0xffa0],
+  [0xfff0, 0xfff8],
+  [0x1bca0, 0x1bca3],
+  [0x1d173, 0x1d17a],
+  [0xe0000, 0xe0fff],
+];
+
 const CASE_FOLD_RANGES: readonly FoldRange[] = [
   [0x41, 0x5a, 1, 32],
   [0xc0, 0xd6, 1, 32],
@@ -1041,6 +1061,34 @@ function stringFromCodePoint(codePoint: number): string {
   return applySnapshot(fromCodePointSnapshot, stringConstructorSnapshot, [codePoint]) as string;
 }
 
+function isScalarCodePoint(codePoint: number): boolean {
+  return (
+    numberIsIntegerSnapshot(codePoint) &&
+    codePoint >= 0 &&
+    codePoint <= 0x10ffff &&
+    (codePoint < 0xd800 || codePoint > 0xdfff)
+  );
+}
+
+function rangeTableContains(ranges: readonly CodePointRange[], codePoint: number): boolean {
+  let low = 0;
+  let high = ranges.length - 1;
+  while (low <= high) {
+    const middle = (low + high) >>> 1;
+    const range = ranges[middle] as CodePointRange;
+    const start = range[0];
+    const end = range[1];
+    if (codePoint < start) {
+      high = middle - 1;
+    } else if (codePoint > end) {
+      low = middle + 1;
+    } else {
+      return true;
+    }
+  }
+  return false;
+}
+
 function foldCodePoint(codePoint: number): string {
   let low = 0;
   let high = CASE_FOLD_EXCEPTIONS.length - 1;
@@ -1098,29 +1146,12 @@ export function fullCaseFoldUnicode15_1(value: string): string {
 }
 
 export function isAssignedScalarUnicode15_1(codePoint: number): boolean {
-  if (
-    !numberIsIntegerSnapshot(codePoint) ||
-    codePoint < 0 ||
-    codePoint > 0x10ffff ||
-    (codePoint >= 0xd800 && codePoint <= 0xdfff)
-  ) {
-    return false;
-  }
+  return isScalarCodePoint(codePoint) && rangeTableContains(ASSIGNED_SCALAR_RANGES, codePoint);
+}
 
-  let low = 0;
-  let high = ASSIGNED_SCALAR_RANGES.length - 1;
-  while (low <= high) {
-    const middle = (low + high) >>> 1;
-    const range = ASSIGNED_SCALAR_RANGES[middle] as AssignedRange;
-    const start = range[0];
-    const end = range[1];
-    if (codePoint < start) {
-      high = middle - 1;
-    } else if (codePoint > end) {
-      low = middle + 1;
-    } else {
-      return true;
-    }
-  }
-  return false;
+export function isDefaultIgnorableCodePointUnicode15_1(codePoint: number): boolean {
+  return (
+    isScalarCodePoint(codePoint) &&
+    rangeTableContains(DEFAULT_IGNORABLE_CODE_POINT_RANGES, codePoint)
+  );
 }
