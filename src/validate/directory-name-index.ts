@@ -1,5 +1,6 @@
 import {
   isResourceNameProfileResult,
+  profileObservedResourceName,
   type ResourceNameProfile,
   type ResourceNameProfileFailureReason,
   type ResourceNameProfileResult,
@@ -107,6 +108,10 @@ export type DirectoryNameLookupResult =
       reason: "invalid_request" | "missing";
     }>;
 
+export type DirectoryNameIndexReprofileResult =
+  | Readonly<{ ok: true; profile: ResourceNameProfile }>
+  | Readonly<{ ok: false; reason: "invalid_input" | "inconsistent" }>;
+
 // Module initialization is the trust boundary for the intrinsics below.
 const applySnapshot = Reflect.apply;
 const arrayIsArraySnapshot = Array.isArray;
@@ -116,6 +121,9 @@ const definePropertySnapshot = Object.defineProperty;
 const freezeSnapshot = Object.freeze;
 const getOwnPropertyDescriptorSnapshot = Object.getOwnPropertyDescriptor;
 const numberIsSafeIntegerSnapshot = Number.isSafeInteger;
+const objectIsSnapshot = Object.is;
+const profileObservedResourceNameSnapshot = profileObservedResourceName;
+const isResourceNameProfileResultSnapshot = isResourceNameProfileResult;
 const stringConstructorSnapshot = String;
 const weakSetAddSnapshot = WeakSet.prototype.add;
 const weakSetHasSnapshot = WeakSet.prototype.has;
@@ -158,6 +166,14 @@ const INVALID_REQUEST: DirectoryNameLookupResult = freezeSnapshot({
   reason: "invalid_request",
 });
 const MISSING: DirectoryNameLookupResult = freezeSnapshot({ ok: false, reason: "missing" });
+const REPROFILE_INVALID_INPUT: DirectoryNameIndexReprofileResult = freezeSnapshot({
+  ok: false,
+  reason: "invalid_input",
+});
+const REPROFILE_INCONSISTENT: DirectoryNameIndexReprofileResult = freezeSnapshot({
+  ok: false,
+  reason: "inconsistent",
+});
 
 function applyIntrinsic<T>(
   intrinsic: (...argumentsList: never[]) => unknown,
@@ -192,6 +208,10 @@ function appendOwnDataSlot<T>(values: T[], value: T): void {
 
 function isSafeInteger(value: unknown): value is number {
   return applyIntrinsic<boolean>(numberIsSafeIntegerSnapshot, Number, [value]);
+}
+
+function isNegativeZero(value: number): boolean {
+  return applyIntrinsic<boolean>(objectIsSnapshot, Object, [value, -0]);
 }
 
 function codeUnitAt(value: string, index: number): number {
@@ -449,6 +469,56 @@ function isGenuineIndex(value: unknown): value is DirectoryNameIndex {
     return false;
   }
   return applyIntrinsic<boolean>(weakSetHasSnapshot, indexProvenance, [value]);
+}
+
+/** Rebuild one genuine indexed entry as a layout-compatible profile without granting authority. */
+export function reprofileDirectoryNameIndexEntry(
+  indexValue: unknown,
+  ordinalValue: unknown,
+): DirectoryNameIndexReprofileResult {
+  if (!isGenuineIndex(indexValue)) {
+    return REPROFILE_INVALID_INPUT;
+  }
+  if (
+    typeof ordinalValue !== "number" ||
+    !isSafeInteger(ordinalValue) ||
+    ordinalValue < 0 ||
+    isNegativeZero(ordinalValue) ||
+    ordinalValue >= indexValue.entries.length
+  ) {
+    return REPROFILE_INVALID_INPUT;
+  }
+
+  try {
+    const slotDescriptor = getOwnDescriptor(indexValue.entries, indexProperty(ordinalValue));
+    if (slotDescriptor === undefined) return REPROFILE_INCONSISTENT;
+    const valueDescriptor = getOwnDescriptor(slotDescriptor, "value");
+    if (valueDescriptor === undefined) return REPROFILE_INCONSISTENT;
+    const entry = valueDescriptor.value as DirectoryNameIndexEntry;
+    const current = applyIntrinsic<ResourceNameProfileResult>(
+      profileObservedResourceNameSnapshot,
+      undefined,
+      [entry.exact],
+    );
+    if (
+      !applyIntrinsic<boolean>(isResourceNameProfileResultSnapshot, undefined, [current]) ||
+      !current.ok
+    ) {
+      return REPROFILE_INCONSISTENT;
+    }
+
+    let mismatches = 0;
+    if (current.exact !== entry.exact) mismatches += 1;
+    if (current.exactByteLength !== entry.exactByteLength) mismatches += 1;
+    if (current.nfc !== entry.nfc) mismatches += 1;
+    if (current.key !== entry.key) mismatches += 1;
+    if (current.isNfc !== entry.isNfc) mismatches += 1;
+    if (mismatches !== 0) return REPROFILE_INCONSISTENT;
+
+    return freezeSnapshot({ ok: true, profile: current });
+  } catch {
+    return REPROFILE_INCONSISTENT;
+  }
 }
 
 /** Build a deterministic, filesystem-free index from one dense array of genuine name profiles. */
