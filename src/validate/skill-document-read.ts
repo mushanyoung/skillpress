@@ -2,6 +2,11 @@ import { type BigIntStats, constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { TextDecoder } from "node:util";
 
+import {
+  type FileMetadataSnapshot,
+  sameFileSnapshot,
+  snapshotFileMetadata,
+} from "./file-metadata.js";
 import type { RootInspection } from "./skill-root.js";
 import { rootInspectionIsCurrent } from "./skill-root.js";
 import { MAX_SKILL_DOCUMENT_BYTES } from "./types.js";
@@ -11,7 +16,7 @@ const READ_BUFFER_BYTES = 64 * 1024;
 export interface DocumentInspection {
   readonly root: RootInspection;
   readonly path: string;
-  readonly metadata: BigIntStats;
+  readonly metadata: FileMetadataSnapshot;
 }
 
 type ReadFailureCode =
@@ -42,19 +47,6 @@ export type VerifySkillRoot = (root: RootInspection) => Promise<boolean>;
 export interface SkillFileOpenCapabilities {
   readonly noFollow: number | undefined;
   readonly nonBlock: number | undefined;
-}
-
-function sameIdentity(expected: BigIntStats, actual: BigIntStats): boolean {
-  return expected.dev === actual.dev && expected.ino === actual.ino;
-}
-
-function sameSnapshot(expected: BigIntStats, actual: BigIntStats): boolean {
-  return (
-    sameIdentity(expected, actual) &&
-    expected.size === actual.size &&
-    expected.mtimeNs === actual.mtimeNs &&
-    expected.ctimeNs === actual.ctimeNs
-  );
 }
 
 function failure(code: ReadFailureCode, message: string): SkillDocumentReadResult {
@@ -92,12 +84,8 @@ export async function readInspectedAgentSkillDocument(
     const canNoFollow = typeof noFollow === "number" && noFollow !== 0;
     const canOpenNonBlocking = typeof nonBlock === "number" && nonBlock !== 0;
     if (!canNoFollow) {
-      const beforeOpen = await lstat(inspected.path, { bigint: true });
-      if (
-        !sameSnapshot(inspected.metadata, beforeOpen) ||
-        !beforeOpen.isFile() ||
-        beforeOpen.isSymbolicLink()
-      ) {
+      const beforeOpen = snapshotFileMetadata(await lstat(inspected.path, { bigint: true }));
+      if (!sameFileSnapshot(inspected.metadata, beforeOpen) || beforeOpen.kind !== "file") {
         return failure("skill.document.changed", "SKILL.md changed before it was opened");
       }
     }
@@ -105,8 +93,8 @@ export async function readInspectedAgentSkillDocument(
       inspected.path,
       constants.O_RDONLY | (canNoFollow ? noFollow : 0) | (canOpenNonBlocking ? nonBlock : 0),
     );
-    const opened = await handle.stat({ bigint: true });
-    if (!opened.isFile() || !sameSnapshot(inspected.metadata, opened)) {
+    const opened = snapshotFileMetadata(await handle.stat({ bigint: true }));
+    if (opened.kind !== "file" || !sameFileSnapshot(inspected.metadata, opened)) {
       return failure("skill.document.changed", "SKILL.md changed while it was being opened");
     }
     const chunks: Buffer[] = [];
@@ -129,14 +117,13 @@ export async function readInspectedAgentSkillDocument(
       );
     }
 
-    const afterRead = await handle.stat({ bigint: true });
-    const finalPath = await lstat(inspected.path, { bigint: true });
+    const afterRead = snapshotFileMetadata(await handle.stat({ bigint: true }));
+    const finalPath = snapshotFileMetadata(await lstat(inspected.path, { bigint: true }));
     if (
       BigInt(total) !== opened.size ||
-      !sameSnapshot(opened, afterRead) ||
-      !sameSnapshot(opened, finalPath) ||
-      finalPath.isSymbolicLink() ||
-      !finalPath.isFile() ||
+      !sameFileSnapshot(opened, afterRead) ||
+      !sameFileSnapshot(opened, finalPath) ||
+      finalPath.kind !== "file" ||
       !(await verifyRoot(inspected.root))
     ) {
       return failure("skill.document.changed", "SKILL.md changed while it was being read");

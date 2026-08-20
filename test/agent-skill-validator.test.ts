@@ -51,6 +51,8 @@ describe("Agent Skill metadata validation", () => {
     expect(Object.isFrozen(report.diagnostics)).toBe(true);
     expect(Object.isFrozen(report.metadata)).toBe(true);
     expect(Object.isFrozen(report.metadata?.metadata)).toBe(true);
+    expect(JSON.stringify(report)).not.toContain("inspection");
+    expect(JSON.stringify(report)).not.toContain(fixture.directory);
   });
 
   it("reports portability and Anthropic warnings without failing valid metadata", async () => {

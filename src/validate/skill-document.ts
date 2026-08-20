@@ -3,6 +3,7 @@ import { lstat, opendir } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import type { DiagnosticCollector } from "./diagnostics.js";
+import { snapshotFileMetadata } from "./file-metadata.js";
 import { type DocumentInspection, readInspectedAgentSkillDocument } from "./skill-document-read.js";
 import {
   inspectAgentSkillRoot,
@@ -16,6 +17,7 @@ const SKILL_DOCUMENT_NAME = "SKILL.md";
 export interface LoadedSkillDocument {
   readonly text: string;
   readonly directoryName: string;
+  readonly inspection: DocumentInspection;
 }
 
 export interface SkillDirectoryHandle {
@@ -109,14 +111,14 @@ export async function inspectAgentSkillDocument(
     return undefined;
   }
   const path = join(root.path, SKILL_DOCUMENT_NAME);
-  let metadata: BigIntStats;
+  let metadata: DocumentInspection["metadata"];
   try {
-    metadata = await io.lstatPath(path);
+    metadata = snapshotFileMetadata(await io.lstatPath(path));
   } catch {
     diagnostics.add("skill.document.read", "error", "skillpress", "SKILL.md cannot be inspected");
     return undefined;
   }
-  if (metadata.isSymbolicLink()) {
+  if (metadata.kind === "symbolic-link") {
     diagnostics.add(
       "skill.document.symlink",
       "error",
@@ -125,7 +127,7 @@ export async function inspectAgentSkillDocument(
     );
     return undefined;
   }
-  if (!metadata.isFile()) {
+  if (metadata.kind !== "file") {
     diagnostics.add(
       "skill.document.not_file",
       "error",
@@ -144,7 +146,7 @@ export async function inspectAgentSkillDocument(
     );
     return undefined;
   }
-  return { root, path, metadata };
+  return Object.freeze({ root, path, metadata });
 }
 
 export async function loadAgentSkillDocument(
@@ -160,5 +162,9 @@ export async function loadAgentSkillDocument(
     diagnostics.add(result.code, "error", "skillpress", result.message);
     return undefined;
   }
-  return { text: result.text, directoryName: basename(root.canonicalPath) };
+  return Object.freeze({
+    text: result.text,
+    directoryName: basename(document.root.canonicalPath),
+    inspection: document,
+  });
 }

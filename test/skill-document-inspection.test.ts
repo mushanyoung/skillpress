@@ -136,5 +136,22 @@ describe("Agent Skill document inspection", () => {
     };
     await inspectAgentSkillDocument(root, diagnostics, io);
     expect(diagnosticCodes(diagnostics)).toEqual(["skill.document.read"]);
+
+    const metadata = await lstat(fixture.path, { bigint: true });
+    const hostile = new Proxy(metadata, {
+      get(target, property, receiver) {
+        if (property === "isFile") throw new Error("secret metadata trap");
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const trapped = new DiagnosticCollector();
+    await inspectAgentSkillDocument(root, trapped, {
+      openDirectory: async () => directory(["SKILL.md"]),
+      lstatPath: async () => hostile,
+      rootIsCurrent: async () => true,
+    });
+    const report = trapped.finish();
+    expect(report.diagnostics.map((entry) => entry.code)).toEqual(["skill.document.read"]);
+    expect(JSON.stringify(report)).not.toContain("secret metadata trap");
   });
 });

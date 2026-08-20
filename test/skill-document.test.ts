@@ -1,5 +1,5 @@
 import { symlinkSync } from "node:fs";
-import { lstat, mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -108,7 +108,16 @@ describe("Agent Skill document loading", () => {
     const diagnostics = new DiagnosticCollector();
     const loaded = await loadAgentSkillDocument(input, diagnostics);
     expect(diagnostics.finish().diagnostics).toEqual([]);
+    if (loaded === undefined) throw new Error("expected the valid skill document to load");
     expect(loaded).toMatchObject({ directoryName: "CaseProbe" });
-    expect(loaded?.text).toContain("name: CaseProbe");
+    expect(loaded.text).toContain("name: CaseProbe");
+    expect(loaded.inspection.path).toBe(join(loaded.inspection.root.path, "SKILL.md"));
+    expect(loaded.inspection.root.canonicalPath).toBe(await realpath(fixture.directory));
+    expect(Object.isFrozen(loaded)).toBe(true);
+    expect(Object.isFrozen(loaded.inspection)).toBe(true);
+    expect(Object.isFrozen(loaded.inspection.metadata)).toBe(true);
+    expect(Object.isFrozen(loaded.inspection.root)).toBe(true);
+    expect(Reflect.set(loaded.inspection.metadata, "ino", 0n)).toBe(false);
+    expect(loaded.inspection.metadata.kind).toBe("file");
   });
 });

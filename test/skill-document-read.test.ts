@@ -1,5 +1,5 @@
 import { constants, symlinkSync } from "node:fs";
-import { mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -105,10 +105,11 @@ describe("bounded Agent Skill document reads", () => {
       skillDocument("name: hostile-read\ndescription: A description.\nlicense: MIT"),
     );
     const inspection = await inspectSkillFixture(fixture.directory, fixture.path);
+    const rawMetadata = await lstat(fixture.path, { bigint: true });
     let closed = false;
     const invalidRead = await readInspectedAgentSkillDocument(inspection, async () => ({
       async stat() {
-        return inspection.metadata;
+        return rawMetadata;
       },
       async read(_buffer, _offset, length) {
         return { bytesRead: length + 1 };
@@ -136,6 +137,7 @@ describe("bounded Agent Skill document reads", () => {
       skillDocument("name: bounded-read\ndescription: A description.\nlicense: MIT"),
     );
     const inspection = await inspectSkillFixture(fixture.directory, fixture.path);
+    const rawMetadata = await lstat(fixture.path, { bigint: true });
     const negative = await readInspectedAgentSkillDocument(
       { ...inspection, metadata: { size: -1n } as typeof inspection.metadata },
       async () => open(fixture.path),
@@ -145,7 +147,7 @@ describe("bounded Agent Skill document reads", () => {
     let closed = false;
     const oversizedStream = await readInspectedAgentSkillDocument(inspection, async () => ({
       async stat() {
-        return inspection.metadata;
+        return rawMetadata;
       },
       async read(buffer, _offset, length) {
         buffer.fill(0x61, 0, length);

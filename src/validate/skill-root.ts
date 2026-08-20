@@ -4,17 +4,22 @@ import { join, parse, relative, resolve, sep } from "node:path";
 
 import { MAX_PATH_COMPONENTS } from "../path-safety.js";
 import type { DiagnosticCollector } from "./diagnostics.js";
+import {
+  type FileMetadataSnapshot,
+  sameFileIdentity,
+  snapshotFileMetadata,
+} from "./file-metadata.js";
 
 export interface PathComponentInspection {
   readonly path: string;
-  readonly metadata: BigIntStats;
+  readonly metadata: FileMetadataSnapshot;
 }
 
 export interface RootInspection {
   readonly path: string;
   readonly canonicalPath: string;
   readonly components: readonly PathComponentInspection[];
-  readonly metadata: BigIntStats;
+  readonly metadata: FileMetadataSnapshot;
 }
 
 export interface RootInspectionIo {
@@ -28,10 +33,6 @@ const DEFAULT_IO: RootInspectionIo = {
   lstatPath: (path) => lstat(path, { bigint: true }),
   realpathPath: realpath,
 };
-
-function sameIdentity(expected: BigIntStats, actual: BigIntStats): boolean {
-  return expected.dev === actual.dev && expected.ino === actual.ino;
-}
 
 function isMissing(error: unknown): boolean {
   try {
@@ -47,12 +48,8 @@ async function pathComponentsAreCurrent(
 ): Promise<boolean> {
   try {
     for (const component of components) {
-      const current = await lstatPath(component.path);
-      if (
-        !sameIdentity(component.metadata, current) ||
-        !current.isDirectory() ||
-        current.isSymbolicLink()
-      ) {
+      const current = snapshotFileMetadata(await lstatPath(component.path));
+      if (!sameFileIdentity(component.metadata, current) || current.kind !== "directory") {
         return false;
       }
     }
@@ -113,8 +110,8 @@ export async function inspectAgentSkillRoot(
   try {
     for (const name of ["", ...names]) {
       if (name !== "") currentPath = join(currentPath, name);
-      const metadata = await io.lstatPath(currentPath);
-      if (metadata.isSymbolicLink()) {
+      const metadata = snapshotFileMetadata(await io.lstatPath(currentPath));
+      if (metadata.kind === "symbolic-link") {
         diagnostics.add(
           "skill.root.symlink",
           "error",
@@ -124,7 +121,7 @@ export async function inspectAgentSkillRoot(
         );
         return undefined;
       }
-      if (!metadata.isDirectory()) {
+      if (metadata.kind !== "directory") {
         diagnostics.add(
           "skill.root.not_directory",
           "error",
@@ -134,7 +131,7 @@ export async function inspectAgentSkillRoot(
         );
         return undefined;
       }
-      components.push({ path: currentPath, metadata });
+      components.push(Object.freeze({ path: currentPath, metadata }));
     }
   } catch (error) {
     const missing = isMissing(error);
@@ -151,9 +148,14 @@ export async function inspectAgentSkillRoot(
   let canonicalPath: string;
   try {
     canonicalPath = await io.realpathPath(absolutePath);
-    const canonical = await io.lstatPath(canonicalPath);
-    const current = { path: absolutePath, canonicalPath, components, metadata };
-    if (!sameIdentity(metadata, canonical) || !(await rootInspectionIsCurrent(current, io))) {
+    const canonical = snapshotFileMetadata(await io.lstatPath(canonicalPath));
+    const current = Object.freeze({
+      path: absolutePath,
+      canonicalPath,
+      components: Object.freeze([...components]),
+      metadata,
+    });
+    if (!sameFileIdentity(metadata, canonical) || !(await rootInspectionIsCurrent(current, io))) {
       diagnostics.add(
         "skill.root.changed",
         "error",
@@ -163,6 +165,7 @@ export async function inspectAgentSkillRoot(
       );
       return undefined;
     }
+    return current;
   } catch {
     diagnostics.add(
       "skill.document.read",
@@ -173,5 +176,4 @@ export async function inspectAgentSkillRoot(
     );
     return undefined;
   }
-  return { path: absolutePath, canonicalPath, components, metadata };
 }

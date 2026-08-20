@@ -142,6 +142,14 @@ describe("Agent Skill root inspection", () => {
     expect(root).toBeDefined();
     if (root === undefined) return;
 
+    expect(Object.isFrozen(root)).toBe(true);
+    expect(Object.isFrozen(root.components)).toBe(true);
+    expect(root.components.every((component) => Object.isFrozen(component))).toBe(true);
+    expect(root.components.every((component) => Object.isFrozen(component.metadata))).toBe(true);
+    expect(root.metadata).toBe(root.components.at(-1)?.metadata);
+    expect(Reflect.set(root.metadata, "dev", root.metadata.dev + 1n)).toBe(false);
+    expect(root.metadata.kind).toBe("directory");
+
     expect(
       await rootInspectionIsCurrent(root, {
         resolvePath: (path) => path,
@@ -167,5 +175,25 @@ describe("Agent Skill root inspection", () => {
         lstatPath: (path) => lstat(path, { bigint: true }),
       }),
     ).toBe(false);
+  });
+
+  it("normalizes hostile filesystem metadata getters", async () => {
+    const parent = await fixtures.parent();
+    const metadata = await lstat(parent, { bigint: true });
+    const hostile = new Proxy(metadata, {
+      get(target, property, receiver) {
+        if (property === "dev") throw new Error("secret metadata trap");
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const diagnostics = new DiagnosticCollector();
+    await inspectAgentSkillRoot(parent, diagnostics, {
+      resolvePath: (path) => path,
+      lstatPath: async () => hostile,
+      realpathPath: async (path) => path,
+    });
+    const report = diagnostics.finish();
+    expect(report.diagnostics.map((entry) => entry.code)).toEqual(["skill.document.read"]);
+    expect(JSON.stringify(report)).not.toContain("secret metadata trap");
   });
 });
