@@ -64,6 +64,24 @@ function hasSupportedNormalization(): boolean {
 const runtimeIsSupported =
   hasSupportedUnicodeVersion(process.versions.unicode) && hasSupportedNormalization();
 
+/**
+ * Project text through the same captured and verified NFC normalizer used by
+ * `portableFilenameKey`. Callers should use this only after that function has
+ * returned `non_nfc`, then validate the projected value with a second keying
+ * pass. A missing value means the runtime must be treated as unsupported.
+ */
+export function projectNfcWithVerifiedRuntime(value: string): string | undefined {
+  if (!runtimeIsSupported) {
+    return undefined;
+  }
+  try {
+    const projected = normalize(value, "NFC");
+    return typeof projected === "string" ? projected : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function portableFilenameKey(value: string): PortableFilenameKeyResult {
   if (!runtimeIsSupported) {
     return UNSUPPORTED_RUNTIME;

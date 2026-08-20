@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { isAssignedScalarUnicode15_1 } from "../src/validate/generated-unicode.js";
 import {
   portableFilenameKey,
+  projectNfcWithVerifiedRuntime,
   type PortableFilenameKeyResult,
 } from "../src/validate/unicode-portability.js";
 
@@ -179,6 +180,23 @@ describe("portable Unicode 15.1 filename keys", () => {
       ok: false,
       reason: "unassigned",
     });
+  });
+
+  it("projects NFC through the same verified captured normalizer", () => {
+    expect(projectNfcWithVerifiedRuntime("e\u0301")).toBe("é");
+    expect(projectNfcWithVerifiedRuntime("\u1100\u1161")).toBe("가");
+    expect(projectNfcWithVerifiedRuntime("already-nfc")).toBe("already-nfc");
+
+    let projected: string | undefined;
+    installNormalize(() => {
+      throw new Error("prototype changed after module initialization");
+    });
+    try {
+      projected = projectNfcWithVerifiedRuntime("e\u0301");
+    } finally {
+      restoreRuntimeProperties();
+    }
+    expect(projected).toBe("é");
   });
 
   it("returns frozen deterministic shapes without retaining rejected input", () => {
@@ -484,7 +502,7 @@ describe("portable Unicode 15.1 filename keys", () => {
       source.matchAll(/\bnormalize\([^,\n]+,\s*"([^"]+)"\)/gu),
       (match) => match[1],
     );
-    expect(formArguments).toEqual(["NFD", "NFC", "NFC", "NFD", "NFD"]);
+    expect(formArguments).toEqual(["NFD", "NFC", "NFC", "NFC", "NFD", "NFD"]);
     expect(source.match(/\bnormalize\(/gu)).toHaveLength(formArguments.length + 1);
     expect(source).not.toContain(".codePointAt(");
     expect(source).not.toContain("for (const character of value)");
