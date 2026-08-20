@@ -1,6 +1,6 @@
 const DEFAULT_IGNORABLE = /\p{Default_Ignorable_Code_Point}/u;
 const WINDOWS_RESERVED_NAME =
-  /^(?:aux|com(?:[1-9]|[¹²³])|con|lpt(?:[1-9]|[¹²³])|nul|prn)(?:\.|$)/iu;
+  /^(?:aux|clock\$|com(?:[1-9]|[¹²³])|con|conin\$|conout\$|lpt(?:[1-9]|[¹²³])|nul|prn)(?:\.|$)/iu;
 const WINDOWS_DEVICE_PREFIX = /^(?:\\\\|\/\/)[?.](?:\\|\/)/u;
 const WINDOWS_DRIVE_RELATIVE = /^[A-Za-z]:(?:$|[^\\/])/u;
 const WINDOWS_FORBIDDEN_COMPONENT = /[<>"|?*]/u;
@@ -8,8 +8,8 @@ const WINDOWS_FORBIDDEN_COMPONENT = /[<>"|?*]/u;
 export const MAX_PATH_INPUT_BYTES = 64 * 1024;
 export const MAX_PATH_COMPONENTS = 256;
 
-function hasUnsafeUnicode(value: string): boolean {
-  if (Buffer.from(value, "utf8").toString("utf8") !== value) return true;
+export function isUnambiguousUnicode(value: string): boolean {
+  if (Buffer.from(value, "utf8").toString("utf8") !== value) return false;
   for (const character of value) {
     const codePoint = character.codePointAt(0) as number;
     if (
@@ -21,10 +21,10 @@ function hasUnsafeUnicode(value: string): boolean {
       codePoint % 0x10000 >= 0xfffe ||
       DEFAULT_IGNORABLE.test(character)
     ) {
-      return true;
+      return false;
     }
   }
-  return false;
+  return true;
 }
 
 function hasUnsafeWindowsSyntax(value: string): boolean {
@@ -60,7 +60,7 @@ export function isSafePathInput(
   ) {
     return false;
   }
-  if (Buffer.byteLength(value, "utf8") > MAX_PATH_INPUT_BYTES || hasUnsafeUnicode(value)) {
+  if (Buffer.byteLength(value, "utf8") > MAX_PATH_INPUT_BYTES || !isUnambiguousUnicode(value)) {
     return false;
   }
   return platform !== "win32" || !hasUnsafeWindowsSyntax(value);
