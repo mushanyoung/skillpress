@@ -14,6 +14,14 @@ npm run build
 node dist/bin.js --help
 ```
 
+The project writer accepts only a bounded, snapshotted rendered manifest. The destination must not
+exist: SkillPress claims it atomically, never overwrites an existing path, and keeps an incomplete
+marker if unknown concurrent data prevents safe rollback.
+The output parent and other processes running as the same operating-system account are a trust
+boundary during creation; portable Node.js does not expose the directory-relative filesystem
+primitives needed to sandbox a malicious same-account process. Run untrusted work in the isolated
+runner introduced by the evaluation workflow, not alongside `create` in the same account.
+
 SkillPress distinguishes local readiness from Tessl's official Quality and Impact scores. It will
 only report the latter when current Tessl evidence exists, and the release profile defaults to a
 minimum of 90 for both.
