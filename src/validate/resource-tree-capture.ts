@@ -189,7 +189,10 @@ function ownCallable<T>(value: unknown, property: PropertyKey): T | undefined {
   }
 }
 
-function captureIo(value: unknown): ResourceTreeCaptureIo | undefined {
+/** Snapshot resource-tree IO callbacks without granting filesystem or traversal authority. */
+export function snapshotResourceTreeCaptureIo(
+  value: unknown = DEFAULT_IO,
+): ResourceTreeCaptureIo | undefined {
   const lstatPath = ownCallable<ResourceTreeCaptureIo["lstatPath"]>(value, "lstatPath");
   if (lstatPath === undefined) return undefined;
   const openDirectory = ownCallable<ResourceTreeCaptureIo["openDirectory"]>(value, "openDirectory");
@@ -461,7 +464,7 @@ export async function captureInspectedResourceTree(
 
   const initial = sampleSignal(signalValue);
   if (initial === "invalid") return INVALID_INPUT;
-  const capturedIo = captureIo(io);
+  const capturedIo = snapshotResourceTreeCaptureIo(io);
   if (capturedIo === undefined) return IO;
   if (initial === "aborted") return ABORTED;
 
