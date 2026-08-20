@@ -1,9 +1,18 @@
+import { join } from "node:path";
+
+import { CapabilityBriefError, ProjectCreationError } from "./create/errors.js";
+import { loadCapabilityBrief } from "./create/load.js";
+import { renderCapabilityProject } from "./create/render.js";
+import { writeRenderedProject } from "./create/write.js";
 import { VERSION } from "./version.js";
 
 export interface CliIo {
-  readonly stdout: (text: string) => void;
-  readonly stderr: (text: string) => void;
+  readonly stdout: (text: string) => void | Promise<void>;
+  readonly stderr: (text: string) => void | Promise<void>;
 }
+export type CliExitCode = 0 | 1 | 2 | 3 | 4;
+const MAX_CLI_ARGUMENTS = 64;
+const MAX_CLI_ARGUMENT_BYTES = 64 * 1024;
 const HELP = `SkillPress ${VERSION}
 
 Build, evaluate, package, and publish production-grade Agent Skills.
@@ -16,30 +25,337 @@ Options:
   -h, --help       Show this help
   -v, --version    Show the installed version
 
-The create, check, test, eval, package, publish, status, and doctor commands
-will be enabled as their independently reviewed implementation slices land.
+Commands:
+  create             Create a complete canonical skill project from a strict brief
+
+The check, test, eval, package, publish, status, and doctor commands will be
+enabled as their independently reviewed implementation slices land.
 `;
 
+const CREATE_HELP = `Create a canonical SkillPress project from a complete capability brief.
+
+Usage:
+  skillpress create --brief <file> --output <new-directory> [--json]
+
+Options:
+  --brief <file>             Read the strict capability brief from this regular YAML file
+  --output <new-directory>  Create this directory; it must not already exist
+  --json                     Emit one stable JSON object
+  -h, --help                 Show this help
+`;
+
+interface CliIssue {
+  readonly code: string;
+  readonly path: string;
+  readonly message: string;
+}
+
+interface CreateArguments {
+  readonly brief: string;
+  readonly output: string;
+  readonly json: boolean;
+}
+
+interface ArgumentSnapshot {
+  readonly args?: readonly string[];
+  readonly jsonRequested: boolean;
+}
+
+class CliUsageError extends Error {
+  readonly issues: readonly CliIssue[];
+
+  constructor(message: string) {
+    super(message);
+    this.name = "CliUsageError";
+    this.issues = [{ code: "cli.usage", path: "/", message }];
+  }
+}
+
 const defaultIo: CliIo = {
-  stdout: (text) => process.stdout.write(text),
-  stderr: (text) => process.stderr.write(text),
+  stdout: (text) => {
+    process.stdout.write(text);
+  },
+  stderr: (text) => {
+    process.stderr.write(text);
+  },
 };
 
 export function renderHelp(): string {
   return HELP;
 }
 
-export async function runCli(args: readonly string[], io: CliIo = defaultIo): Promise<number> {
-  if (args.length === 0 || args[0] === "--help" || args[0] === "-h" || args[0] === "help") {
-    io.stdout(renderHelp());
-    return 0;
+export function renderCreateHelp(): string {
+  return CREATE_HELP;
+}
+
+function assertPathArgument(flag: string, value: string | undefined): string {
+  if (value === undefined || value.startsWith("--")) {
+    throw new CliUsageError(`${flag} requires a path value.`);
+  }
+  const hasControlCharacter = [...value].some((character) => {
+    const codePoint = character.codePointAt(0) as number;
+    return (
+      codePoint < 0x20 ||
+      (codePoint >= 0x7f && codePoint <= 0x9f) ||
+      codePoint === 0x2028 ||
+      codePoint === 0x2029 ||
+      (codePoint >= 0xfdd0 && codePoint <= 0xfdef) ||
+      codePoint % 0x10000 >= 0xfffe ||
+      /\p{Default_Ignorable_Code_Point}/u.test(character)
+    );
+  });
+  const invalidUnicode = Buffer.from(value, "utf8").toString("utf8") !== value;
+  if (value.trim() === "" || hasControlCharacter || invalidUnicode) {
+    throw new CliUsageError(`${flag} must be a non-empty, unambiguous Unicode path.`);
+  }
+  return value;
+}
+
+function parseCreateArguments(args: readonly string[]): CreateArguments {
+  let brief: string | undefined;
+  let output: string | undefined;
+  let json = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--json") {
+      if (json) {
+        throw new CliUsageError("--json may be specified only once.");
+      }
+      json = true;
+    } else if (argument === "--brief") {
+      if (brief !== undefined) {
+        throw new CliUsageError("--brief may be specified only once.");
+      }
+      brief = assertPathArgument("--brief", args[index + 1]);
+      index += 1;
+    } else if (argument === "--output") {
+      if (output !== undefined) {
+        throw new CliUsageError("--output may be specified only once.");
+      }
+      output = assertPathArgument("--output", args[index + 1]);
+      index += 1;
+    } else {
+      throw new CliUsageError("Unknown create argument.");
+    }
   }
 
-  if (args[0] === "--version" || args[0] === "-v") {
-    io.stdout(`${VERSION}\n`);
-    return 0;
+  if (brief === undefined || output === undefined) {
+    throw new CliUsageError("create requires both --brief and --output.");
   }
+  return { brief, output, json };
+}
 
-  io.stderr(`Unknown command: ${args[0]}\nRun 'skillpress --help' for usage.\n`);
+function wantsJson(args: readonly string[]): boolean {
+  return args.includes("--json");
+}
+
+async function writeStdout(io: CliIo, text: string): Promise<boolean> {
+  try {
+    await io.stdout(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function writeError(
+  io: CliIo,
+  json: boolean,
+  code: string,
+  message: string,
+  issues: readonly CliIssue[],
+): Promise<boolean> {
+  try {
+    if (json) {
+      await io.stderr(`${JSON.stringify({ ok: false, code, message, issues })}\n`);
+      return true;
+    }
+
+    const details = issues
+      .map((entry) => `- ${entry.path}: ${entry.message} [${entry.code}]`)
+      .join("\n");
+    await io.stderr(`${message}\n${details === "" ? "" : `${details}\n`}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function writeInternalFailure(io: CliIo, json: boolean): Promise<CliExitCode> {
+  await writeError(io, json, "internal", "SkillPress could not complete the command.", [
+    { code: "create.internal", path: "/", message: "unexpected internal failure" },
+  ]);
+  return 1;
+}
+
+function snapshotArguments(value: unknown): ArgumentSnapshot {
+  let jsonRequested = false;
+  try {
+    if (!Array.isArray(value)) {
+      return { jsonRequested };
+    }
+    const count = value.length;
+    if (!Number.isSafeInteger(count) || count < 0) {
+      return { jsonRequested };
+    }
+    const result: string[] = [];
+    let bytes = 0;
+    let valid = count <= MAX_CLI_ARGUMENTS;
+    const capturedCount = Math.min(count, MAX_CLI_ARGUMENTS);
+    for (let index = 0; index < capturedCount; index += 1) {
+      const argument: unknown = value[index];
+      if (typeof argument !== "string") {
+        valid = false;
+        continue;
+      }
+      jsonRequested ||= argument === "--json";
+      if (argument.length > MAX_CLI_ARGUMENT_BYTES) {
+        valid = false;
+        continue;
+      }
+      bytes += Buffer.byteLength(argument, "utf8");
+      if (bytes > MAX_CLI_ARGUMENT_BYTES) {
+        valid = false;
+      }
+      result.push(argument);
+    }
+    return valid && result.length === count
+      ? { args: Object.freeze(result), jsonRequested }
+      : { jsonRequested };
+  } catch {
+    return { jsonRequested };
+  }
+}
+
+function snapshotIo(value: unknown): CliIo | undefined {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    const stdout: unknown = (value as { readonly stdout?: unknown }).stdout;
+    const stderr: unknown = (value as { readonly stderr?: unknown }).stderr;
+    if (typeof stdout !== "function" || typeof stderr !== "function") {
+      return undefined;
+    }
+    return Object.freeze({
+      stdout: (text: string) => Reflect.apply(stdout, value, [text]) as void | Promise<void>,
+      stderr: (text: string) => Reflect.apply(stderr, value, [text]) as void | Promise<void>,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function runCreate(args: readonly string[], io: CliIo): Promise<CliExitCode> {
+  const json = wantsJson(args);
+  let parsed: CreateArguments;
+  try {
+    parsed = parseCreateArguments(args);
+    const brief = await loadCapabilityBrief(parsed.brief);
+    const result = await writeRenderedProject(renderCapabilityProject(brief), parsed.output);
+    if (parsed.json) {
+      if (
+        !(await writeStdout(io, `${JSON.stringify({ ok: true, command: "create", ...result })}\n`))
+      ) {
+        return 1;
+      }
+    } else {
+      if (
+        !(await writeStdout(
+          io,
+          `Created ${result.root}\nCanonical skill: ${join(result.root, result.skillPath)}\nFiles: ${result.files.length}\n`,
+        ))
+      ) {
+        return 1;
+      }
+    }
+    return 0;
+  } catch (error) {
+    if (error instanceof CliUsageError) {
+      await writeError(io, json, "usage", error.message, error.issues);
+      return 2;
+    }
+    if (error instanceof CapabilityBriefError) {
+      await writeError(io, json, "brief.invalid", error.message, error.issues);
+      return 3;
+    }
+    if (error instanceof ProjectCreationError) {
+      const unsafe = error.kind === "unsafe-output";
+      await writeError(
+        io,
+        json,
+        unsafe ? "create.unsafe_output" : "create.io",
+        error.message,
+        error.issues,
+      );
+      return unsafe ? 4 : 1;
+    }
+    return writeInternalFailure(io, json);
+  }
+}
+
+async function usageFailure(
+  args: readonly string[],
+  io: CliIo,
+  message: string,
+): Promise<CliExitCode> {
+  const error = new CliUsageError(message);
+  await writeError(io, wantsJson(args), "usage", error.message, error.issues);
   return 2;
+}
+
+export async function runCli(args: readonly string[], io: CliIo = defaultIo): Promise<CliExitCode> {
+  const capturedIo = snapshotIo(io);
+  if (capturedIo === undefined) {
+    return 1;
+  }
+  const argumentSnapshot = snapshotArguments(args);
+  if (argumentSnapshot.args === undefined) {
+    const error = new CliUsageError("CLI arguments must be a bounded array of strings.");
+    await writeError(
+      capturedIo,
+      argumentSnapshot.jsonRequested,
+      "usage",
+      error.message,
+      error.issues,
+    );
+    return 2;
+  }
+  const capturedArgs = argumentSnapshot.args;
+
+  if (capturedArgs.length === 0) {
+    return (await writeStdout(capturedIo, renderHelp())) ? 0 : 1;
+  }
+
+  if (capturedArgs[0] === "--help" || capturedArgs[0] === "-h" || capturedArgs[0] === "help") {
+    if (capturedArgs.length !== 1) {
+      return usageFailure(capturedArgs, capturedIo, "Help does not accept additional arguments.");
+    }
+    return (await writeStdout(capturedIo, renderHelp())) ? 0 : 1;
+  }
+
+  if (capturedArgs[0] === "--version" || capturedArgs[0] === "-v") {
+    if (capturedArgs.length !== 1) {
+      return usageFailure(
+        capturedArgs,
+        capturedIo,
+        "Version does not accept additional arguments.",
+      );
+    }
+    return (await writeStdout(capturedIo, `${VERSION}\n`)) ? 0 : 1;
+  }
+
+  if (capturedArgs[0] === "create") {
+    if ((capturedArgs[1] === "--help" || capturedArgs[1] === "-h") && capturedArgs.length === 2) {
+      return (await writeStdout(capturedIo, renderCreateHelp())) ? 0 : 1;
+    }
+    return runCreate(capturedArgs.slice(1), capturedIo);
+  }
+
+  return usageFailure(
+    capturedArgs,
+    capturedIo,
+    "Unknown command. Run 'skillpress --help' for usage.",
+  );
 }

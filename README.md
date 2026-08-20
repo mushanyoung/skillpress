@@ -14,6 +14,19 @@ npm run build
 node dist/bin.js --help
 ```
 
+Create accepts a complete, strictly validated capability brief and refuses partial TODO-style
+scaffolds:
+
+```bash
+skillpress create --brief capability-brief.yaml --output ./my-skill
+skillpress create --brief capability-brief.yaml --output ./my-skill --json
+```
+
+The brief contract is defined by
+[`schemas/capability-brief.schema.json`](schemas/capability-brief.schema.json). Exit codes are `0`
+for success, `1` for unexpected I/O/internal failure, `2` for usage, `3` for an invalid brief, and
+`4` for an unsafe or already-existing output.
+
 The project writer accepts only a bounded, snapshotted rendered manifest. The destination must not
 exist: SkillPress claims it atomically, never overwrites an existing path, and keeps an incomplete
 marker if unknown concurrent data prevents safe rollback.

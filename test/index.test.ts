@@ -6,6 +6,7 @@ describe("public API", () => {
   it("exports the CLI scaffold and project writer entrypoints", () => {
     expect(skillpress.VERSION).toMatch(/^\d+\.\d+\.\d+$/);
     expect(skillpress.renderHelp()).toContain(skillpress.VERSION);
+    expect(skillpress.renderCreateHelp()).toContain("skillpress create");
     expect(skillpress.runCli).toBeTypeOf("function");
     expect(skillpress.ProjectCreationError).toBeTypeOf("function");
     expect(skillpress.writeRenderedProject).toBeTypeOf("function");

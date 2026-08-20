@@ -1,5 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -8,6 +17,7 @@ import { VERSION } from "../src/version.js";
 
 const binPath = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
 const staleBuildPath = fileURLToPath(new URL("../dist/stale-build-output.js", import.meta.url));
+const briefPath = fileURLToPath(new URL("fixtures/create/complete-brief.yaml", import.meta.url));
 
 function invokeBin(...args: readonly string[]): {
   readonly status: number | null;
@@ -48,12 +58,43 @@ describe("compiled SkillPress binary", () => {
     expect(result.stderr).toBe("");
   });
 
-  it("returns the usage exit code for an unknown command", () => {
+  it("returns the usage exit code for an incomplete create command", () => {
     const result = invokeBin("create");
 
     expect(result.status).toBe(2);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("Unknown command: create");
+    expect(result.stderr).toContain("requires both --brief and --output");
+  });
+
+  it("rejects trailing top-level arguments without reflecting them", () => {
+    const result = invokeBin("--version", "FORGED");
+
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("does not accept additional arguments");
+    expect(result.stderr).not.toContain("FORGED");
+  });
+
+  it("creates a real project from the compiled binary", () => {
+    const parent = mkdtempSync(join(realpathSync(tmpdir()), "skillpress-bin-test-"));
+    const output = join(parent, "project");
+    try {
+      const result = invokeBin("create", "--brief", briefPath, "--output", output, "--json");
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        ok: true,
+        command: "create",
+        root: output,
+        skillPath: "skills/incident-summary",
+      });
+      expect(readFileSync(join(output, "skills/incident-summary/SKILL.md"), "utf8")).toContain(
+        "name: incident-summary",
+      );
+    } finally {
+      rmSync(parent, { recursive: true });
+    }
   });
 
   it("removes stale output before rebuilding", () => {
