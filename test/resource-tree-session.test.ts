@@ -60,11 +60,26 @@ function failure(reason: ResourceTreeCaptureFailureReason) {
   return barrier({ ok: false as const, reason });
 }
 
+const mockFileMetadata = Object.freeze({
+  dev: 1n,
+  ino: 2n,
+  mode: 0o100600n,
+  size: 1n,
+  mtimeNs: 1n,
+  ctimeNs: 1n,
+  kind: "file" as const,
+});
+
 function captureSuccess(marker: string) {
+  const documentEntry = Object.freeze({
+    role: "document" as const,
+    layout: Object.freeze({ entryIndex: 0, relativePath: "SKILL.md" }),
+    metadata: mockFileMetadata,
+  });
   return barrier({
     ok: true as const,
     root: Object.freeze({ marker }),
-    entries: Object.freeze([]),
+    entries: Object.freeze([documentEntry]),
   });
 }
 
