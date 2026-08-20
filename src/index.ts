@@ -22,3 +22,18 @@ export type {
   ProjectWritePhase,
 } from "./create/write.js";
 export { VERSION } from "./version.js";
+export { validateAgentSkill } from "./validate/agent-skill.js";
+export {
+  MAX_SKILL_DIAGNOSTICS,
+  MAX_SKILL_DIRECTORY_ENTRIES,
+  MAX_SKILL_DOCUMENT_BYTES,
+  MAX_SKILL_FRONTMATTER_BYTES,
+} from "./validate/types.js";
+export type {
+  AgentSkillDiagnostic,
+  AgentSkillDiagnosticScope,
+  AgentSkillDiagnosticSeverity,
+  AgentSkillMetadata,
+  AgentSkillValidationOptions,
+  AgentSkillValidationReport,
+} from "./validate/types.js";

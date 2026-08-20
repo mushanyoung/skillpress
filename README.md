@@ -35,6 +35,21 @@ boundary during creation; portable Node.js does not expose the directory-relativ
 primitives needed to sandbox a malicious same-account process. Run untrusted work in the isolated
 runner introduced by the evaluation workflow, not alongside `create` in the same account.
 
+The package also exposes the strict canonical-skill validator used by later readiness and release
+gates:
+
+```js
+import { validateAgentSkill } from "@mushanyoung/skillpress";
+
+const report = await validateAgentSkill("./skills/my-skill", { expectedName: "my-skill" });
+```
+
+Validation reads a bounded, regular `SKILL.md` without executing it. It enforces portable Agent
+Skills frontmatter, canonical path spelling, deterministic diagnostics, and safe metadata. An
+`ok: true` report may still contain portability or target-specific warnings; it is not a readiness
+score, an evaluation result, or a publication receipt. Markdown reference traversal is introduced
+by the next validator slice.
+
 SkillPress distinguishes local readiness from Tessl's official Quality and Impact scores. It will
 only report the latter when current Tessl evidence exists, and the release profile defaults to a
 minimum of 90 for both.

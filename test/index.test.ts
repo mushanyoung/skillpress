@@ -10,5 +10,7 @@ describe("public API", () => {
     expect(skillpress.runCli).toBeTypeOf("function");
     expect(skillpress.ProjectCreationError).toBeTypeOf("function");
     expect(skillpress.writeRenderedProject).toBeTypeOf("function");
+    expect(skillpress.validateAgentSkill).toBeTypeOf("function");
+    expect(skillpress.MAX_SKILL_DIAGNOSTICS).toBe(256);
   });
 });
