@@ -447,9 +447,9 @@ describe("Agent Skill root inspection", () => {
     const parent = await fixtures.parent();
     const metadata = await lstat(parent, { bigint: true });
     const hostile = new Proxy(metadata, {
-      get(target, property, receiver) {
+      getOwnPropertyDescriptor(target, property) {
         if (property === "dev") throw new Error("secret metadata trap");
-        return Reflect.get(target, property, receiver);
+        return Reflect.getOwnPropertyDescriptor(target, property);
       },
     });
     const diagnostics = new DiagnosticCollector();

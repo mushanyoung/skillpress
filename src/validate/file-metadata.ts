@@ -1,4 +1,4 @@
-import type { BigIntStats } from "node:fs";
+import { constants } from "node:fs";
 
 export type FileKind = "directory" | "file" | "other" | "symbolic-link";
 
@@ -13,41 +13,95 @@ export interface FileMetadataSnapshot {
   readonly kind: FileKind;
 }
 
-function bigintField(value: unknown): bigint {
-  if (typeof value !== "bigint")
-    throw new TypeError("filesystem metadata must contain bigint fields");
-  return value;
+// Module initialization is the trust boundary for filesystem constants and intrinsics.
+const freezeSnapshot = Object.freeze;
+const getOwnPropertyDescriptorSnapshot = Object.getOwnPropertyDescriptor;
+const TypeErrorSnapshot = TypeError;
+const modeTypeMask = BigInt(constants.S_IFMT);
+const directoryMode = BigInt(constants.S_IFDIR);
+const fileMode = BigInt(constants.S_IFREG);
+const symbolicLinkMode = BigInt(constants.S_IFLNK);
+
+const INVALID_METADATA_MESSAGE = "filesystem metadata must contain valid bigint fields";
+
+function invalidMetadata(): never {
+  throw new TypeErrorSnapshot(INVALID_METADATA_MESSAGE);
 }
 
-function booleanField(value: unknown): boolean {
-  if (typeof value !== "boolean") {
-    throw new TypeError("filesystem metadata type checks must return booleans");
-  }
-  return value;
+function kindFromMode(mode: bigint): FileKind {
+  const type = mode & modeTypeMask;
+  if (type === directoryMode) return "directory";
+  if (type === fileMode) return "file";
+  if (type === symbolicLinkMode) return "symbolic-link";
+  return "other";
 }
 
-/** Copies a Node BigIntStats object without retaining its mutable or lazy Date accessors. */
-export function snapshotFileMetadata(metadata: BigIntStats): FileMetadataSnapshot {
-  const directory = booleanField(metadata.isDirectory());
-  const file = booleanField(metadata.isFile());
-  const symbolicLink = booleanField(metadata.isSymbolicLink());
-  if (Number(directory) + Number(file) + Number(symbolicLink) > 1) {
-    throw new TypeError("filesystem metadata has contradictory file types");
+function descriptorDataValue(descriptor: PropertyDescriptor): unknown {
+  let valueDescriptor: PropertyDescriptor | undefined;
+  try {
+    valueDescriptor = getOwnPropertyDescriptorSnapshot(descriptor, "value");
+  } catch {
+    invalidMetadata();
   }
-  const kind: FileKind = directory
-    ? "directory"
-    : file
-      ? "file"
-      : symbolicLink
-        ? "symbolic-link"
-        : "other";
-  return Object.freeze({
-    dev: bigintField(metadata.dev),
-    ino: bigintField(metadata.ino),
-    mode: bigintField(metadata.mode),
-    size: bigintField(metadata.size),
-    mtimeNs: bigintField(metadata.mtimeNs),
-    ctimeNs: bigintField(metadata.ctimeNs),
+  if (valueDescriptor === undefined) invalidMetadata();
+  return valueDescriptor.value;
+}
+
+function ownDataValue(metadata: object, property: PropertyKey): unknown {
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = getOwnPropertyDescriptorSnapshot(metadata, property);
+  } catch {
+    invalidMetadata();
+  }
+  if (descriptor === undefined) invalidMetadata();
+  return descriptorDataValue(descriptor);
+}
+
+/**
+ * Copies runtime lstat metadata without retaining mutable objects or lazy Date accessors.
+ * File kind is derived only from the captured POSIX mode bits.
+ */
+export function snapshotFileMetadata(metadata: unknown): FileMetadataSnapshot {
+  if (typeof metadata !== "object" || metadata === null) invalidMetadata();
+
+  const dev = ownDataValue(metadata, "dev");
+  const ino = ownDataValue(metadata, "ino");
+  const mode = ownDataValue(metadata, "mode");
+  const size = ownDataValue(metadata, "size");
+  const mtimeNs = ownDataValue(metadata, "mtimeNs");
+  const ctimeNs = ownDataValue(metadata, "ctimeNs");
+
+  let kindDescriptor: PropertyDescriptor | undefined;
+  try {
+    kindDescriptor = getOwnPropertyDescriptorSnapshot(metadata, "kind");
+  } catch {
+    invalidMetadata();
+  }
+  const declaredKind =
+    kindDescriptor === undefined ? undefined : descriptorDataValue(kindDescriptor);
+
+  if (
+    typeof dev !== "bigint" ||
+    typeof ino !== "bigint" ||
+    typeof mode !== "bigint" ||
+    typeof size !== "bigint" ||
+    typeof mtimeNs !== "bigint" ||
+    typeof ctimeNs !== "bigint"
+  ) {
+    invalidMetadata();
+  }
+
+  const kind = kindFromMode(mode);
+  if (kindDescriptor !== undefined && declaredKind !== kind) invalidMetadata();
+
+  return freezeSnapshot({
+    dev,
+    ino,
+    mode,
+    size,
+    mtimeNs,
+    ctimeNs,
     kind,
   });
 }

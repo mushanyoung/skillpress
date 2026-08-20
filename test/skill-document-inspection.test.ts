@@ -285,9 +285,9 @@ describe("Agent Skill document inspection", () => {
 
     const metadata = await lstat(fixture.path, { bigint: true });
     const hostile = new Proxy(metadata, {
-      get(target, property, receiver) {
-        if (property === "isFile") throw new Error("secret metadata trap");
-        return Reflect.get(target, property, receiver);
+      getOwnPropertyDescriptor(target, property) {
+        if (property === "mode") throw new Error("secret metadata trap");
+        return Reflect.getOwnPropertyDescriptor(target, property);
       },
     });
     const trapped = new DiagnosticCollector();

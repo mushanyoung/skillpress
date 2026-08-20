@@ -732,6 +732,19 @@ describe("bounded raw directory reads", () => {
         ioFor(null as unknown as BigIntStats, []),
       ),
     ).toEqual({ ok: false, reason: "invalid-metadata" });
+    expect(
+      await readInspectedDirectoryNames(
+        inspected,
+        async () => true,
+        ioFor(
+          {
+            ...stats,
+            mode: (stats.mode & ~BigInt(0o170000)) | BigInt(0o100000),
+          } as BigIntStats,
+          [],
+        ),
+      ),
+    ).toEqual({ ok: false, reason: "invalid-metadata" });
   });
 
   it("surfaces impossible duplicate raw entries only as a frozen index failure", async () => {
@@ -751,6 +764,40 @@ describe("bounded raw directory reads", () => {
 
   it("rejects malformed inspections before any callback or filesystem IO", async () => {
     const { inspected, stats } = await inspectedFixture("invalid-inspection");
+    const metadataWithoutKind = {
+      dev: inspected.metadata.dev,
+      ino: inspected.metadata.ino,
+      mode: inspected.metadata.mode,
+      size: inspected.metadata.size,
+      mtimeNs: inspected.metadata.mtimeNs,
+      ctimeNs: inspected.metadata.ctimeNs,
+    };
+    const inheritedKindMetadata = Object.assign(
+      Object.create({ kind: "directory" }) as object,
+      metadataWithoutKind,
+    );
+    let kindGetterCalls = 0;
+    const accessorKindMetadata = Object.defineProperty({ ...metadataWithoutKind }, "kind", {
+      get() {
+        kindGetterCalls += 1;
+        return "directory";
+      },
+    });
+    const missingScalarMetadata = {
+      ...inspected.metadata,
+    } as unknown as Record<PropertyKey, unknown>;
+    Reflect.deleteProperty(missingScalarMetadata, "dev");
+    const inheritedScalarMetadata = Object.assign(
+      Object.create({ dev: inspected.metadata.dev }) as object,
+      missingScalarMetadata,
+    );
+    let scalarGetterCalls = 0;
+    const accessorScalarMetadata = Object.defineProperty({ ...inspected.metadata }, "dev", {
+      get() {
+        scalarGetterCalls += 1;
+        return inspected.metadata.dev;
+      },
+    });
     const malformed = [
       null,
       {},
@@ -763,6 +810,12 @@ describe("bounded raw directory reads", () => {
       }),
     ];
     const malformedMetadata = [
+      metadataWithoutKind,
+      inheritedKindMetadata,
+      accessorKindMetadata,
+      missingScalarMetadata,
+      inheritedScalarMetadata,
+      accessorScalarMetadata,
       { ...inspected.metadata, dev: 1 },
       { ...inspected.metadata, ino: 1 },
       { ...inspected.metadata, mode: 1 },
@@ -772,6 +825,11 @@ describe("bounded raw directory reads", () => {
       { ...inspected.metadata, kind: "file" },
       {
         ...inspected.metadata,
+        mode: (inspected.metadata.mode & ~BigInt(0o170000)) | BigInt(0o100000),
+      },
+      {
+        ...inspected.metadata,
+        kind: "file",
         mode: (inspected.metadata.mode & ~BigInt(0o170000)) | BigInt(0o100000),
       },
     ];
@@ -811,5 +869,7 @@ describe("bounded raw directory reads", () => {
       ).toEqual({ ok: false, reason: "invalid-metadata" });
     }
     expect(calls).toBe(0);
+    expect(kindGetterCalls).toBe(0);
+    expect(scalarGetterCalls).toBe(0);
   });
 });

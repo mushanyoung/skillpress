@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { type BigIntStats, constants } from "node:fs";
+import type { BigIntStats } from "node:fs";
 import { lstat, opendir } from "node:fs/promises";
 import { TextDecoder, TextEncoder } from "node:util";
 
@@ -8,7 +8,11 @@ import {
   type DirectoryNameIndexFailure,
   indexDirectoryNames,
 } from "./directory-name-index.js";
-import type { FileMetadataSnapshot } from "./file-metadata.js";
+import {
+  type FileMetadataSnapshot,
+  sameFileSnapshot,
+  snapshotFileMetadata,
+} from "./file-metadata.js";
 import {
   MAX_RESOURCE_NAME_BYTES,
   profileObservedResourceName,
@@ -100,6 +104,8 @@ const freezeSnapshot = Object.freeze;
 const getOwnPropertyDescriptorSnapshot = Object.getOwnPropertyDescriptor;
 const lstatBuiltinSnapshot = lstat;
 const opendirBuiltinSnapshot = opendir as unknown as OpenDirectorySnapshot;
+const sameFileSnapshotSnapshot = sameFileSnapshot;
+const snapshotFileMetadataSnapshot = snapshotFileMetadata;
 const profileObservedResourceNameSnapshot = profileObservedResourceName;
 const indexDirectoryNamesSnapshot = indexDirectoryNames;
 const stringConstructorSnapshot = String;
@@ -112,9 +118,6 @@ const typedArrayByteLengthGetter = Object.getOwnPropertyDescriptor(
   typedArrayPrototype,
   "byteLength",
 )?.get;
-const DIRECTORY_MODE = BigInt(constants.S_IFDIR);
-const MODE_TYPE_MASK = BigInt(constants.S_IFMT);
-
 const RAW_OPEN_OPTIONS: RawDirectoryOpenOptions = freezeSnapshot({
   encoding: "buffer",
   bufferSize: 1,
@@ -169,51 +172,22 @@ function isObject(value: unknown): value is Record<PropertyKey, unknown> {
 function copyExpectedMetadata(value: unknown): FileMetadataSnapshot | undefined {
   if (!isObject(value)) return undefined;
   try {
-    const { dev, ino, mode, size, mtimeNs, ctimeNs, kind } = value;
-    if (
-      typeof dev !== "bigint" ||
-      typeof ino !== "bigint" ||
-      typeof mode !== "bigint" ||
-      typeof size !== "bigint" ||
-      typeof mtimeNs !== "bigint" ||
-      typeof ctimeNs !== "bigint" ||
-      kind !== "directory" ||
-      (mode & MODE_TYPE_MASK) !== DIRECTORY_MODE
-    ) {
+    const kindDescriptor = getOwnDescriptor(value, "kind");
+    if (kindDescriptor === undefined) return undefined;
+    const kindValueDescriptor = getOwnDescriptor(kindDescriptor, "value");
+    if (kindValueDescriptor === undefined || kindValueDescriptor.value !== "directory") {
       return undefined;
     }
-    return freezeSnapshot({ dev, ino, mode, size, mtimeNs, ctimeNs, kind });
+    return snapshotFileMetadataSnapshot(value);
   } catch {
     return undefined;
   }
 }
 
 function snapshotDirectoryMetadata(value: unknown): FileMetadataSnapshot | undefined {
-  if (!isObject(value)) return undefined;
   try {
-    const { dev, ino, mode, size, mtimeNs, ctimeNs } = value;
-    if (
-      typeof dev !== "bigint" ||
-      typeof ino !== "bigint" ||
-      typeof mode !== "bigint" ||
-      typeof size !== "bigint" ||
-      typeof mtimeNs !== "bigint" ||
-      typeof ctimeNs !== "bigint"
-    ) {
-      return undefined;
-    }
-    if ((mode & MODE_TYPE_MASK) !== DIRECTORY_MODE) {
-      return undefined;
-    }
-    return freezeSnapshot({
-      dev,
-      ino,
-      mode,
-      size,
-      mtimeNs,
-      ctimeNs,
-      kind: "directory",
-    });
+    const metadata = snapshotFileMetadataSnapshot(value);
+    return metadata.kind === "directory" ? metadata : undefined;
   } catch {
     return undefined;
   }
@@ -246,18 +220,6 @@ function copyInspection(
     ok: true,
     directory: freezeSnapshot({ path, metadata }),
   });
-}
-
-function sameSnapshot(left: FileMetadataSnapshot, right: FileMetadataSnapshot): boolean {
-  return (
-    left.dev === right.dev &&
-    left.ino === right.ino &&
-    left.mode === right.mode &&
-    left.size === right.size &&
-    left.mtimeNs === right.mtimeNs &&
-    left.ctimeNs === right.ctimeNs &&
-    left.kind === right.kind
-  );
 }
 
 function indexProperty(index: number): string {
@@ -382,7 +344,7 @@ export async function readInspectedDirectoryNames(
       await applyIntrinsic<Promise<BigIntStats>>(lstatPath, undefined, [current.path]),
     );
     if (beforeMetadata === undefined) return failure("invalid-metadata");
-    if (!sameSnapshot(current.metadata, beforeMetadata)) {
+    if (!sameFileSnapshotSnapshot(current.metadata, beforeMetadata)) {
       return changed("directory", "before-open");
     }
 
@@ -462,7 +424,7 @@ export async function readInspectedDirectoryNames(
       await applyIntrinsic<Promise<BigIntStats>>(lstatPath, undefined, [current.path]),
     );
     if (afterMetadata === undefined) return failure("invalid-metadata");
-    const directoryChanged = !sameSnapshot(current.metadata, afterMetadata);
+    const directoryChanged = !sameFileSnapshotSnapshot(current.metadata, afterMetadata);
     const afterContext = await applyIntrinsic<Promise<boolean>>(verifyContext, undefined, []);
     if (directoryChanged) return changed("directory", "reading");
     if (afterContext !== true) return changed("context", "reading");
