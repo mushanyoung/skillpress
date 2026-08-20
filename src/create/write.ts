@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { link, lstat, mkdir, mkdtemp, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, parse, relative, resolve, sep } from "node:path";
 
+import { isSafePathInput } from "../path-safety.js";
+
 import {
   type CapabilityBriefIssue,
   ProjectCreationError,
@@ -52,28 +54,6 @@ function creationError(
   cause?: unknown,
 ): ProjectCreationError {
   return new ProjectCreationError(message, kind, [issue(code, "/", detail)], cause);
-}
-
-function isUnsafeOutputPath(value: unknown): boolean {
-  if (
-    typeof value !== "string" ||
-    value.trim() === "" ||
-    Buffer.from(value, "utf8").toString("utf8") !== value
-  ) {
-    return true;
-  }
-  return [...value].some((character) => {
-    const codePoint = character.codePointAt(0) as number;
-    return (
-      codePoint < 0x20 ||
-      (codePoint >= 0x7f && codePoint <= 0x9f) ||
-      codePoint === 0x2028 ||
-      codePoint === 0x2029 ||
-      (codePoint >= 0xfdd0 && codePoint <= 0xfdef) ||
-      codePoint % 0x10000 >= 0xfffe ||
-      /\p{Default_Ignorable_Code_Point}/u.test(character)
-    );
-  });
 }
 
 function snapshotWriteOptions(value: unknown): SnapshottedProjectWriteOptions {
@@ -226,7 +206,7 @@ export async function writeRenderedProject(
   output: string,
   options: ProjectWriteOptions = {},
 ): Promise<CreatedCapabilityProject> {
-  if (isUnsafeOutputPath(output)) {
+  if (!isSafePathInput(output)) {
     throw creationError(
       "SkillPress output must use an unambiguous Unicode path.",
       "unsafe-output",

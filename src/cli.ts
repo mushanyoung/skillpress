@@ -4,6 +4,7 @@ import { CapabilityBriefError, ProjectCreationError } from "./create/errors.js";
 import { loadCapabilityBrief } from "./create/load.js";
 import { renderCapabilityProject } from "./create/render.js";
 import { writeRenderedProject } from "./create/write.js";
+import { isSafePathInput } from "./path-safety.js";
 import { VERSION } from "./version.js";
 
 export interface CliIo {
@@ -92,20 +93,7 @@ function assertPathArgument(flag: string, value: string | undefined): string {
   if (value === undefined || value.startsWith("--")) {
     throw new CliUsageError(`${flag} requires a path value.`);
   }
-  const hasControlCharacter = [...value].some((character) => {
-    const codePoint = character.codePointAt(0) as number;
-    return (
-      codePoint < 0x20 ||
-      (codePoint >= 0x7f && codePoint <= 0x9f) ||
-      codePoint === 0x2028 ||
-      codePoint === 0x2029 ||
-      (codePoint >= 0xfdd0 && codePoint <= 0xfdef) ||
-      codePoint % 0x10000 >= 0xfffe ||
-      /\p{Default_Ignorable_Code_Point}/u.test(character)
-    );
-  });
-  const invalidUnicode = Buffer.from(value, "utf8").toString("utf8") !== value;
-  if (value.trim() === "" || hasControlCharacter || invalidUnicode) {
+  if (!isSafePathInput(value)) {
     throw new CliUsageError(`${flag} must be a non-empty, unambiguous Unicode path.`);
   }
   return value;
