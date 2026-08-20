@@ -18,6 +18,7 @@ import {
   MAX_SKILL_MARKDOWN_GRAPH_NODES,
   MAX_SKILL_MARKDOWN_GRAPH_TARGETS,
   MAX_SKILL_MARKDOWN_GRAPH_WORK,
+  type BundledResourceNameFinding,
   type MarkdownResourceGraph,
   type MarkdownResourceGraphFailureReason,
   type MarkdownResourceGraphFinding,
@@ -163,6 +164,39 @@ function budgetMessage(
       return `Markdown resource graph exceeds ${MAX_SKILL_MARKDOWN_GRAPH_COMPONENTS} local path components`;
     case "alias_candidates":
       return `Markdown resource graph exceeds ${MAX_SKILL_MARKDOWN_GRAPH_ALIAS_CANDIDATES} alias candidates`;
+  }
+}
+
+/** Add fixed diagnostics for credential-like basenames found across the retained resource tree. */
+export function addBundledResourceNameFindingDiagnostics(
+  diagnostics: DiagnosticCollector,
+  findings: readonly BundledResourceNameFinding[],
+): void {
+  for (let index = 0; index < findings.length; index += 1) {
+    const finding = findings[index] as BundledResourceNameFinding;
+    switch (finding.kind) {
+      case "environment_file":
+        add(
+          diagnostics,
+          "skill.resources.environment_file",
+          "skill resource tree must not contain environment files",
+          { file: finding.file },
+        );
+        break;
+      case "credential_file":
+        add(
+          diagnostics,
+          "skill.resources.credential_file",
+          "skill resource tree must not contain credential-like files",
+          { file: finding.file },
+        );
+        break;
+      default: {
+        const unreachable: never = finding;
+        void unreachable;
+        throw new TypeError("unsupported bundled resource name finding");
+      }
+    }
   }
 }
 

@@ -4,11 +4,13 @@ import { DiagnosticCollector } from "../src/validate/diagnostics.js";
 import type { MarkdownAnalysisIssue } from "../src/validate/markdown-analysis.js";
 import type { MarkdownDestinationIssue } from "../src/validate/markdown-destination.js";
 import type {
+  BundledResourceNameFinding,
   MarkdownResourceGraph,
   MarkdownResourceGraphFailureReason,
   MarkdownResourceGraphFinding,
 } from "../src/validate/markdown-resource-graph.js";
 import {
+  addBundledResourceNameFindingDiagnostics,
   addMarkdownResourceGraphFailureDiagnostic,
   addMarkdownResourceGraphFindingDiagnostics,
 } from "../src/validate/markdown-resource-diagnostics.js";
@@ -42,6 +44,12 @@ function mapped(finding: MarkdownResourceGraphFinding) {
   return diagnostics.finish().diagnostics;
 }
 
+function mappedResource(finding: BundledResourceNameFinding) {
+  const diagnostics = new DiagnosticCollector();
+  addBundledResourceNameFindingDiagnostics(diagnostics, [finding]);
+  return diagnostics.finish().diagnostics;
+}
+
 function expected(code: string, message: string) {
   return [
     {
@@ -57,6 +65,23 @@ function expected(code: string, message: string) {
 }
 
 describe("Markdown resource diagnostics", () => {
+  it.each([
+    [
+      "environment_file",
+      "skill.resources.environment_file",
+      "skill resource tree must not contain environment files",
+    ],
+    [
+      "credential_file",
+      "skill.resources.credential_file",
+      "skill resource tree must not contain credential-like files",
+    ],
+  ] as const)("maps bundled resource finding %s", (kind, code, message) => {
+    expect(mappedResource({ kind, file: SOURCE })).toEqual([
+      { code, severity: "error", scope: "skillpress", file: SOURCE, message },
+    ]);
+  });
+
   it.each([
     ["skill.markdown.complexity", "Markdown exceeds the supported analysis complexity"],
     ["skill.markdown.duplicate_definition", "Markdown reference definitions must be unique"],

@@ -17,6 +17,7 @@ const indexPath = "../src/validate/resource-tree-path-index.js";
 const sourcePath = "../src/validate/skill-source.js";
 const analysisPath = "../src/validate/markdown-analysis.js";
 const destinationPath = "../src/validate/markdown-destination.js";
+const resourceNamePath = "../src/validate/bundled-resource-name.js";
 const mockedPaths = [
   abortPath,
   sessionPath,
@@ -24,6 +25,7 @@ const mockedPaths = [
   sourcePath,
   analysisPath,
   destinationPath,
+  resourceNamePath,
 ] as const;
 
 afterEach(async () => {
@@ -127,7 +129,15 @@ describe("Markdown resource graph", () => {
     expect(result.ok).toBe(true);
     if (!result.ok || !("graph" in result)) throw new Error("expected graph success");
     expect(result.documentText).toBe(source);
-    expectBarrier(result, ["ok", "documentText", "graph"]);
+    expectBarrier(result, ["ok", "documentText", "resourceFindings", "graph"]);
+    expect(result.resourceFindings).toEqual([]);
+    expect(graphModule.isGenuineBundledResourceNameFindings(result.resourceFindings)).toBe(true);
+    expect(graphModule.isGenuineBundledResourceNameFindings([...result.resourceFindings])).toBe(
+      false,
+    );
+    expect(
+      graphModule.isGenuineBundledResourceNameFindings(new Proxy(result.resourceFindings, {})),
+    ).toBe(false);
     expectBarrier(result.graph, [
       "surface",
       "complete",
@@ -185,10 +195,22 @@ describe("Markdown resource graph", () => {
 
   it("returns frozen graphless lexical results and preserves outer session failures", async () => {
     const graphModule = await import(graphPath);
-    const plain = await genuineDocument("graphless", "plain Markdown\n");
+    const plainFixture = await fixtures.skill("graphless", "plain Markdown\n");
+    await mkdir(join(plainFixture.directory, "nested"));
+    await writeFile(join(plainFixture.directory, "nested", ".ENV.local"), Buffer.from([0xff]));
+    await writeFile(join(plainFixture.directory, "nested", "secret.PEM"), "x".repeat(524_289));
+    const plain = { fixture: plainFixture, document: await inspectDocument(plainFixture) };
     const graphless = await graphModule.buildInspectedMarkdownResourceGraph(plain.document);
-    expect(graphless).toEqual({ ok: true, documentText: "plain Markdown\n" });
-    expectBarrier(graphless, ["ok", "documentText"]);
+    expect(graphless).toEqual({
+      ok: true,
+      documentText: "plain Markdown\n",
+      resourceFindings: [
+        { kind: "environment_file", file: "nested/.ENV.local" },
+        { kind: "credential_file", file: "nested/secret.PEM" },
+      ],
+    });
+    expectBarrier(graphless, ["ok", "documentText", "resourceFindings"]);
+    expectDeepFrozen(graphless);
 
     const hugeSource = skillDocument(
       "name: huge\ndescription: Huge graph fixture.\nlicense: MIT",
@@ -212,7 +234,7 @@ describe("Markdown resource graph", () => {
 
 type MockEntry = Readonly<{
   role: "document" | "resource-file" | "directory";
-  layout: Readonly<{ entryIndex: number; relativePath: string }>;
+  layout: Readonly<{ entryIndex: number; exactName: string; relativePath: string }>;
   metadata: Readonly<{ size: bigint; kind: "file" | "directory" }>;
 }>;
 type MockAnalysis = Readonly<{
@@ -226,7 +248,12 @@ type FileSpec = Readonly<{
   analysis?: MockAnalysis;
   role?: MockEntry["role"];
   size?: bigint;
+  exactName?: string;
 }>;
+
+function terminalName(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
 
 function rawEntry(
   role: unknown = "document",
@@ -234,10 +261,11 @@ function rawEntry(
   size: unknown = 1n,
   kind: unknown = "file",
   entryIndex: unknown = 0,
+  exactName: unknown = typeof path === "string" ? terminalName(path) : path,
 ) {
   return Object.freeze({
     role,
-    layout: Object.freeze({ entryIndex, relativePath: path }),
+    layout: Object.freeze({ entryIndex, exactName, relativePath: path }),
     metadata: Object.freeze({ size, kind }),
   });
 }
@@ -311,6 +339,7 @@ type MockState = {
   readonly texts: Map<object, string>;
   readonly analyses: Map<string, MockAnalysis>;
   readonly genuineAnalyses: WeakSet<object>;
+  readonly genuineResourceNames: WeakSet<object>;
   readonly paths: Map<string, number>;
   readonly calls: {
     open: unknown[][];
@@ -324,6 +353,8 @@ type MockState = {
     component: unknown[][];
     genuineSession: unknown[][];
     genuineAnalysis: unknown[][];
+    resourceClassify: unknown[][];
+    genuineResourceName: unknown[][];
   };
   projectResult: unknown;
   openImpl: (...args: unknown[]) => unknown;
@@ -337,6 +368,8 @@ type MockState = {
   componentImpl: (...args: unknown[]) => unknown;
   genuineSessionImpl: (...args: unknown[]) => unknown;
   genuineAnalysisImpl: (...args: unknown[]) => unknown;
+  resourceClassifyImpl: (...args: unknown[]) => unknown;
+  genuineResourceNameImpl: (...args: unknown[]) => unknown;
 };
 
 function envelopeFor(text: string) {
@@ -359,12 +392,17 @@ function makeState(specs: readonly FileSpec[]): MockState {
   const texts = new Map<object, string>();
   const analyses = new Map<string, MockAnalysis>();
   const genuineAnalyses = new WeakSet<object>();
+  const genuineResourceNames = new WeakSet<object>();
   const paths = new Map<string, number>();
   const entries = specs.map((spec, entryIndex) => {
     const role = spec.role ?? (entryIndex === 0 ? "document" : "resource-file");
     const entry = Object.freeze({
       role,
-      layout: Object.freeze({ entryIndex, relativePath: spec.path }),
+      layout: Object.freeze({
+        entryIndex,
+        exactName: spec.exactName ?? terminalName(spec.path),
+        relativePath: spec.path,
+      }),
       metadata: Object.freeze({
         size: spec.size ?? BigInt(Buffer.byteLength(spec.text)),
         kind: role === "directory" ? ("directory" as const) : ("file" as const),
@@ -393,6 +431,8 @@ function makeState(specs: readonly FileSpec[]): MockState {
     component: [] as unknown[][],
     genuineSession: [] as unknown[][],
     genuineAnalysis: [] as unknown[][],
+    resourceClassify: [] as unknown[][],
+    genuineResourceName: [] as unknown[][],
   };
   const state = {} as MockState;
   state.entries = entries;
@@ -401,6 +441,7 @@ function makeState(specs: readonly FileSpec[]): MockState {
   state.texts = texts;
   state.analyses = analyses;
   state.genuineAnalyses = genuineAnalyses;
+  state.genuineResourceNames = genuineResourceNames;
   state.paths = paths;
   state.calls = calls;
   state.projectResult = envelopeFor(specs[0]?.text ?? "");
@@ -436,7 +477,23 @@ function makeState(specs: readonly FileSpec[]): MockState {
   state.genuineSessionImpl = (value) => value === state.session;
   state.genuineAnalysisImpl = (value) =>
     typeof value === "object" && value !== null && state.genuineAnalyses.has(value as object);
+  const safeResourceName = Object.freeze({ ok: true as const });
+  genuineResourceNames.add(safeResourceName);
+  state.resourceClassifyImpl = () => safeResourceName;
+  state.genuineResourceNameImpl = (value) =>
+    typeof value === "object" && value !== null && genuineResourceNames.has(value as object);
   return state;
+}
+
+function resourceClassification(
+  state: MockState,
+  reason?: "invalid_input" | "environment_file" | "credential_file",
+) {
+  const result = Object.freeze(
+    reason === undefined ? { ok: true as const } : { ok: false as const, reason },
+  );
+  state.genuineResourceNames.add(result);
+  return result;
 }
 
 async function mockedGraph(state: MockState) {
@@ -494,6 +551,16 @@ async function mockedGraph(state: MockState) {
       return state.componentImpl(...args);
     },
   }));
+  vi.doMock(resourceNamePath, () => ({
+    classifyBundledResourceFileName: function (this: unknown, ...args: unknown[]) {
+      record(state.calls.resourceClassify, [this, ...args]);
+      return state.resourceClassifyImpl(...args);
+    },
+    isGenuineBundledResourceFileNameClassification: function (this: unknown, ...args: unknown[]) {
+      record(state.calls.genuineResourceName, [this, ...args]);
+      return state.genuineResourceNameImpl(...args);
+    },
+  }));
   vi.resetModules();
   return import(graphPath);
 }
@@ -503,6 +570,18 @@ async function builtMockGraph(state: MockState) {
   const result = await graphModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT);
   if (!result.ok || !("graph" in result)) throw new Error("expected mocked graph success");
   return result.graph;
+}
+
+async function expectMockFailure(
+  state: MockState,
+  reason: string = "inconsistent",
+  signal?: unknown,
+): Promise<void> {
+  const graphModule = await mockedGraph(state);
+  expect(await graphModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT, signal)).toEqual({
+    ok: false,
+    reason,
+  });
 }
 
 function linkedFiles(count: number, nodeCounts?: readonly number[]): MockState {
@@ -523,7 +602,7 @@ function linkedFiles(count: number, nodeCounts?: readonly number[]): MockState {
 
 type MutableMockEntry = {
   role: MockEntry["role"];
-  layout: { entryIndex: number; relativePath: string };
+  layout: { entryIndex: number; exactName: string; relativePath: string };
   metadata: { size: bigint; kind: "file" | "directory" };
 };
 
@@ -531,7 +610,11 @@ function mutableState(specs: readonly FileSpec[]) {
   const state = makeState(specs);
   const entries: MutableMockEntry[] = state.entries.map((entry) => ({
     role: entry.role,
-    layout: { entryIndex: entry.layout.entryIndex, relativePath: entry.layout.relativePath },
+    layout: {
+      entryIndex: entry.layout.entryIndex,
+      exactName: entry.layout.exactName,
+      relativePath: entry.layout.relativePath,
+    },
     metadata: { size: entry.metadata.size, kind: entry.metadata.kind },
   }));
   const session = { entries };
@@ -656,6 +739,10 @@ describe("isolated Markdown resource graph producers", () => {
       { entries: [rawEntry("unknown")], reason: "inconsistent" },
       { entries: [rawEntry("document", "SKILL.md", 1n, "directory")], reason: "inconsistent" },
       { entries: [rawEntry("document", "wrong.md")], reason: "inconsistent" },
+      {
+        entries: [rawEntry("document", "SKILL.md", 1n, "file", 0, "wrong.md")],
+        reason: "inconsistent",
+      },
     ] as const;
     for (const invalid of invalidCases) {
       const state = makeState([{ path: "SKILL.md", text: MOCK_ROOT }]);
@@ -672,7 +759,7 @@ describe("isolated Markdown resource graph producers", () => {
 
     const rootEntry = {
       role: "document" as const,
-      layout: { entryIndex: 0, relativePath: "SKILL.md" },
+      layout: { entryIndex: 0, exactName: "SKILL.md", relativePath: "SKILL.md" },
       metadata: { size: BigInt(Buffer.byteLength(MOCK_ROOT)), kind: "file" as const },
     };
     const state = makeState([{ path: "SKILL.md", text: MOCK_ROOT }]);
@@ -693,12 +780,179 @@ describe("isolated Markdown resource graph producers", () => {
 
     const badIndex = makeState([{ path: "SKILL.md", text: MOCK_ROOT }]);
     badIndex.createImpl = () => Object.freeze({ ok: false as const, reason: "invalid_input" });
-    const badIndexModule = await mockedGraph(badIndex);
-    expect(await badIndexModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT)).toEqual({
-      ok: false,
-      reason: "inconsistent",
-    });
+    await expectMockFailure(badIndex);
     expect(badIndex.calls.read).toHaveLength(0);
+  });
+
+  it("scans every retained resource basename at the exact inventory and name limits", async () => {
+    const exact = makeState([
+      { path: "SKILL.md", text: MOCK_ROOT },
+      ...Array.from({ length: 8_191 }, (_, index) => ({
+        path: `resource-${index}`,
+        text: "",
+        exactName: index === 8_190 ? "x".repeat(255) : `resource-${index}`,
+      })),
+    ]);
+    const exactModule = await mockedGraph(exact);
+    const exactResult = await exactModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT);
+    expect(exactResult.ok).toBe(true);
+    expect(exact.calls.resourceClassify).toHaveLength(8_191);
+    expect(exact.calls.resourceClassify[0]).toEqual([undefined, "resource-0"]);
+    expect(exact.calls.resourceClassify.at(-1)).toEqual([undefined, "x".repeat(255)]);
+    expect([exact.calls.read.length, exact.calls.current.length]).toEqual([1, 1]);
+
+    const oversized = makeState([
+      { path: "SKILL.md", text: MOCK_ROOT },
+      { path: "oversized", exactName: "x".repeat(256), text: "unread" },
+    ]);
+    oversized.resourceClassifyImpl = () => resourceClassification(oversized, "invalid_input");
+    await expectMockFailure(oversized);
+    expect([oversized.calls.read.length, oversized.calls.current.length]).toEqual([0, 0]);
+  }, 60_000);
+
+  it("fails closed on hostile resource classifiers before reading any member", async () => {
+    let gets = 0;
+    for (const mode of [
+      "invalid",
+      "throw",
+      "nongenuine",
+      "predicateThrow",
+      "predicateTruthy",
+    ] as const) {
+      const state = makeState([
+        { path: "SKILL.md", text: MOCK_ROOT, size: 524_289n },
+        { path: ".env", text: "unread" },
+      ]);
+      const hostile = Object.defineProperty({}, "ok", {
+        get() {
+          gets += 1;
+          throw new Error("non-genuine result must remain opaque");
+        },
+      });
+      state.resourceClassifyImpl =
+        mode === "invalid"
+          ? () => resourceClassification(state, "invalid_input")
+          : mode === "throw"
+            ? () => {
+                throw new Error("private classifier failure");
+              }
+            : () => hostile;
+      if (mode === "predicateThrow")
+        state.genuineResourceNameImpl = () => {
+          throw new Error("private predicate failure");
+        };
+      if (mode === "predicateTruthy") state.genuineResourceNameImpl = () => ({ truthy: true });
+      await expectMockFailure(state);
+      expect([
+        state.calls.read.length,
+        state.calls.analyze.length,
+        state.calls.current.length,
+      ]).toEqual([0, 0, 0]);
+    }
+    expect(gets).toBe(0);
+  });
+
+  it("retains resource findings only after root and graph outcomes are known", async () => {
+    for (const rootResult of ["too_large", "io"] as const) {
+      const state = makeState([
+        {
+          path: "SKILL.md",
+          text: MOCK_ROOT,
+          size: rootResult === "too_large" ? 524_289n : undefined,
+        },
+        { path: ".env", text: "unread" },
+      ]);
+      const unsafe = resourceClassification(state, "environment_file");
+      state.resourceClassifyImpl = () => unsafe;
+      if (rootResult === "io")
+        state.readImpl = () =>
+          Promise.resolve(barrier({ ok: false as const, reason: "io" as const }));
+      const graphModule = await mockedGraph(state);
+      const result = await graphModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT);
+      expect(result).toEqual({ ok: false, reason: rootResult });
+      expect(JSON.stringify(result)).not.toContain("environment_file");
+      expect([state.calls.read.length, state.calls.current.length]).toEqual([
+        rootResult === "io" ? 1 : 0,
+        0,
+      ]);
+    }
+
+    const budget = makeState([
+      { path: "SKILL.md", text: MOCK_ROOT, analysis: mockAnalysis([], [], 100_001) },
+      { path: "secret.pem", text: "unread" },
+    ]);
+    const unsafe = resourceClassification(budget, "credential_file");
+    budget.resourceClassifyImpl = () => unsafe;
+    const budgetModule = await mockedGraph(budget);
+    const result = await budgetModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT);
+    expect(result.ok).toBe(true);
+    if (!result.ok || !("graph" in result)) throw new Error("expected graph result");
+    expect(result.resourceFindings).toEqual([{ kind: "credential_file", file: "secret.pem" }]);
+    expect(result.graph.findings).toContainEqual({
+      kind: "budget",
+      limit: "nodes",
+      file: "SKILL.md",
+      location: expect.any(Object),
+    });
+    expect(result.graph.complete).toBe(false);
+    expect(budget.calls.current).toHaveLength(1);
+  });
+
+  it("rejects post-scan inventory mutation before the first member read", async () => {
+    const mutations = [
+      (entries: MutableMockEntry[]) => (requiredEntry(entries, 1).layout.exactName = "changed"),
+      (entries: MutableMockEntry[]) => (requiredEntry(entries, 1).role = "directory"),
+      (entries: MutableMockEntry[]) => (entries[1] = { ...requiredEntry(entries, 1) }),
+      (entries: MutableMockEntry[]) => {
+        const entry = requiredEntry(entries, 1);
+        entry.layout = { ...entry.layout };
+      },
+      (entries: MutableMockEntry[], session: { entries: MutableMockEntry[] }) =>
+        (session.entries = [...entries]),
+    ];
+    for (const mutate of mutations) {
+      const { entries, session, state } = mutableState([
+        { path: "SKILL.md", text: MOCK_ROOT },
+        { path: "first.bin", text: "unread" },
+        { path: "last.bin", text: "unread" },
+      ]);
+      state.genuineResourceNameImpl = (value) => {
+        if (state.calls.genuineResourceName.length === 2) mutate(entries, session);
+        return typeof value === "object" && value !== null && state.genuineResourceNames.has(value);
+      };
+      await expectMockFailure(state);
+      expect([
+        state.calls.resourceClassify.length,
+        state.calls.read.length,
+        state.calls.current.length,
+      ]).toEqual([2, 0, 0]);
+    }
+
+    let gets = 0;
+    let samples = 0;
+    vi.doMock(abortPath, () => ({
+      sampleAbortSignal: () => (++samples === 6 ? "aborted" : "active"),
+    }));
+    const aborted = mutableState([
+      { path: "SKILL.md", text: MOCK_ROOT },
+      { path: "asset.bin", text: "unread" },
+    ]);
+    aborted.state.genuineResourceNameImpl = (value) => {
+      Object.defineProperty(requiredEntry(aborted.entries, 1).layout, "exactName", {
+        get() {
+          gets += 1;
+          throw new Error("replay must remain property-free");
+        },
+      });
+      return aborted.state.genuineResourceNames.has(value as object);
+    };
+    await expectMockFailure(aborted.state, "aborted", {});
+    expect([
+      samples,
+      gets,
+      aborted.state.calls.read.length,
+      aborted.state.calls.current.length,
+    ]).toEqual([6, 0, 0, 0]);
   });
 
   it("revalidates every exact B binding after producers and before publication", async () => {
@@ -770,18 +1024,22 @@ describe("isolated Markdown resource graph producers", () => {
     for (const finalCase of finalCases) {
       const { entries, state } = mutableState([
         { path: "SKILL.md", text: MOCK_ROOT },
-        { path: "asset.bin", text: "unread" },
+        { path: ".env", text: "unread" },
       ]);
+      const staged = resourceClassification(state, "environment_file");
+      state.resourceClassifyImpl = () => staged;
       state.currentImpl = () => {
         requiredEntry(entries, 1).metadata.size += 1n;
         return Promise.resolve(finalCase.current);
       };
       const graphModule = await mockedGraph(state);
-      expect(await graphModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT)).toEqual({
+      const finalResult = await graphModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT);
+      expect(finalResult).toEqual({
         ok: false,
         reason: finalCase.reason,
       });
       expect(state.calls.current).toHaveLength(1);
+      expect(JSON.stringify(finalResult)).not.toContain("environment_file");
     }
   });
 
@@ -1229,21 +1487,13 @@ describe("isolated Markdown resource graph producers", () => {
           barrier({ ok: true as const, text: MOCK_ROOT, byteLength: Buffer.byteLength(MOCK_ROOT) }),
         ),
       );
-    const hostileReadModule = await mockedGraph(hostileRead);
-    expect(await hostileReadModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT)).toEqual({
-      ok: false,
-      reason: "inconsistent",
-    });
+    await expectMockFailure(hostileRead);
     expect(hostileRead.calls.current).toHaveLength(0);
 
     const hostileCurrent = makeState([{ path: "SKILL.md", text: MOCK_ROOT }]);
     hostileCurrent.currentImpl = () =>
       new HostilePromise((resolve) => resolve(barrier({ ok: true as const, current: true })));
-    const hostileCurrentModule = await mockedGraph(hostileCurrent);
-    expect(await hostileCurrentModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT)).toEqual({
-      ok: false,
-      reason: "inconsistent",
-    });
+    await expectMockFailure(hostileCurrent);
     expect(thenGets).toBe(0);
 
     let thenableGets = 0;
@@ -1256,16 +1506,12 @@ describe("isolated Markdown resource graph producers", () => {
           throw new Error("must reject thenables property-free");
         },
       });
-    const thenableModule = await mockedGraph(thenableRead);
-    expect(await thenableModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT)).toEqual({
-      ok: false,
-      reason: "inconsistent",
-    });
+    await expectMockFailure(thenableRead);
     expect(thenableGets).toBe(0);
 
     let samples = 0;
     vi.doMock(abortPath, () => ({
-      sampleAbortSignal: () => (++samples === 4 ? "invalid" : "active"),
+      sampleAbortSignal: () => (++samples === 5 ? "invalid" : "active"),
     }));
     const invalidSignal = makeState([{ path: "SKILL.md", text: MOCK_ROOT }]);
     const invalidSignalModule = await mockedGraph(invalidSignal);
@@ -1275,7 +1521,7 @@ describe("isolated Markdown resource graph producers", () => {
     );
     expect(invalidResult).toEqual({ ok: false, reason: "invalid_input" });
     expectBarrier(invalidResult, ["ok", "reason"]);
-    expect(samples).toBe(4);
+    expect(samples).toBe(5);
     expect(invalidSignal.calls.read).toHaveLength(1);
     expect(invalidSignal.calls.current).toHaveLength(0);
   });
@@ -1284,6 +1530,8 @@ describe("isolated Markdown resource graph producers", () => {
     const stages = [
       "sessionPredicate",
       "create",
+      "resourceClassify",
+      "resourcePredicate",
       "project",
       "analyze",
       "analysisPredicate",
@@ -1306,6 +1554,7 @@ describe("isolated Markdown resource graph producers", () => {
         if (
           stage === "sessionPredicate" ||
           stage === "create" ||
+          stage === "resourceClassify" ||
           stage === "analyze" ||
           stage === "component"
         )
@@ -1314,6 +1563,8 @@ describe("isolated Markdown resource graph producers", () => {
       };
       if (stage === "sessionPredicate") state.genuineSessionImpl = stop;
       if (stage === "create") state.createImpl = stop;
+      if (stage === "resourceClassify") state.resourceClassifyImpl = stop;
+      if (stage === "resourcePredicate") state.genuineResourceNameImpl = stop;
       if (stage === "project") state.projectImpl = stop;
       if (stage === "analyze") state.analyzeImpl = stop;
       if (stage === "analysisPredicate") state.genuineAnalysisImpl = stop;
@@ -1328,6 +1579,8 @@ describe("isolated Markdown resource graph producers", () => {
       expect(state.calls.current, stage).toHaveLength(0);
       if (stage === "sessionPredicate") expect(state.calls.create).toHaveLength(0);
       if (stage === "create") expect(state.calls.read).toHaveLength(0);
+      if (stage === "resourceClassify" || stage === "resourcePredicate")
+        expect(state.calls.read).toHaveLength(0);
       if (stage === "project") expect(state.calls.analyze).toHaveLength(0);
       if (stage === "analyze") expect(state.calls.classify).toHaveLength(0);
       if (stage === "analysisPredicate") expect(state.calls.classify).toHaveLength(0);
@@ -1343,11 +1596,7 @@ describe("isolated Markdown resource graph producers", () => {
       Promise.resolve(
         barrier({ ok: true as const, text: "x".repeat(512 * 1024 + 1), byteLength: 0 }),
       );
-    const oversizedReadModule = await mockedGraph(oversizedRead);
-    expect(await oversizedReadModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT)).toEqual({
-      ok: false,
-      reason: "inconsistent",
-    });
+    await expectMockFailure(oversizedRead);
     expect(oversizedRead.calls.current).toHaveLength(0);
 
     const destinationCases = [
@@ -1398,20 +1647,9 @@ describe("isolated Markdown resource graph producers", () => {
         match: "fold" as const,
         exacts: hostileExacts,
       });
-    const aliasesModule = await mockedGraph(aliases);
-    expect(await aliasesModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT)).toEqual({
-      ok: false,
-      reason: "inconsistent",
-    });
+    await expectMockFailure(aliases);
     expect(exactGets).toBe(0);
 
-    const expectInconsistent = async (state: MockState) => {
-      const graphModule = await mockedGraph(state);
-      expect(await graphModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT)).toEqual({
-        ok: false,
-        reason: "inconsistent",
-      });
-    };
     const envelopeCases = [
       runInNewContext("({ok:true,envelope:{}})"),
       Object.freeze({ ok: false as const, reason: "invalid_input" as const }),
@@ -1430,7 +1668,7 @@ describe("isolated Markdown resource graph producers", () => {
     for (const projected of envelopeCases) {
       const state = makeState([{ path: "SKILL.md", text: MOCK_ROOT }]);
       state.projectResult = projected;
-      await expectInconsistent(state);
+      await expectMockFailure(state);
     }
 
     const resolution = (reason: string, extras: object = {}) =>
@@ -1456,7 +1694,7 @@ describe("isolated Markdown resource graph producers", () => {
         { path: "SKILL.md", text: MOCK_ROOT, analysis: mockAnalysis([mockTarget("target")]) },
       ]);
       state.resolveImpl = () => resolved;
-      await expectInconsistent(state);
+      await expectMockFailure(state);
     }
   });
 

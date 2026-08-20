@@ -5,9 +5,12 @@ import { DiagnosticCollector } from "./diagnostics.js";
 import { parseAgentSkillFrontmatter } from "./frontmatter.js";
 import {
   buildInspectedMarkdownResourceGraph,
+  isGenuineBundledResourceNameFindings,
+  type BundledResourceNameFinding,
   type MarkdownResourceGraph,
 } from "./markdown-resource-graph.js";
 import {
+  addBundledResourceNameFindingDiagnostics,
   addMarkdownResourceGraphFailureDiagnostic,
   addMarkdownResourceGraphFindingDiagnostics,
 } from "./markdown-resource-diagnostics.js";
@@ -30,6 +33,7 @@ const basenameSnapshot = basename;
 const buildGraphSnapshot = buildInspectedMarkdownResourceGraph;
 const inspectDocumentSnapshot = inspectAgentSkillDocument;
 const inspectRootSnapshot = inspectAgentSkillRoot;
+const genuineResourceFindingsSnapshot = isGenuineBundledResourceNameFindings;
 const objectGetOwnPropertyDescriptorSnapshot = Object.getOwnPropertyDescriptor;
 
 function error(
@@ -196,6 +200,20 @@ function ownGraph(value: object): MarkdownResourceGraph | undefined {
   return valueDescriptor?.value as MarkdownResourceGraph | undefined;
 }
 
+function ownResourceFindings(value: object): readonly BundledResourceNameFinding[] | undefined {
+  try {
+    const descriptor = objectGetOwnPropertyDescriptorSnapshot(value, "resourceFindings");
+    if (descriptor === undefined) return undefined;
+    const valueDescriptor = objectGetOwnPropertyDescriptorSnapshot(descriptor, "value");
+    const findings = valueDescriptor?.value;
+    return genuineResourceFindingsSnapshot(findings)
+      ? (findings as readonly BundledResourceNameFinding[])
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Validate one canonical Agent Skill without executing its instructions or fetching external URLs.
  * Throws TypeError only for malformed API arguments; skill findings are returned as diagnostics.
@@ -224,6 +242,12 @@ export async function validateAgentSkill(
     parsed === undefined
       ? undefined
       : validateFields(parsed, directoryName, expectedName, diagnostics);
+  const resourceFindings = ownResourceFindings(graphed);
+  if (resourceFindings === undefined) {
+    addMarkdownResourceGraphFailureDiagnostic(diagnostics, "inconsistent");
+    return diagnostics.finish(metadata);
+  }
+  addBundledResourceNameFindingDiagnostics(diagnostics, resourceFindings);
   const graph = ownGraph(graphed);
   if (graph !== undefined) addMarkdownResourceGraphFindingDiagnostics(diagnostics, graph);
   return diagnostics.finish(metadata);

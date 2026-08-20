@@ -3,6 +3,10 @@ import { types } from "node:util";
 
 import { type AbortSignalSample, sampleAbortSignal } from "./abort-signal.js";
 import {
+  classifyBundledResourceFileName,
+  isGenuineBundledResourceFileNameClassification,
+} from "./bundled-resource-name.js";
+import {
   analyzeMarkdown,
   isGenuineMarkdownAnalysis,
   type MarkdownAnalysis,
@@ -97,6 +101,9 @@ export type MarkdownResourceGraphFinding =
       limit: "files" | "bytes" | "nodes" | "targets" | "work" | "components" | "alias_candidates";
       location: MarkdownResourceGraphLocation;
     }>;
+export type BundledResourceNameFinding =
+  | Finding<{ kind: "environment_file" }>
+  | Finding<{ kind: "credential_file" }>;
 export type MarkdownResourceGraphTotals = Readonly<{
   files: number;
   bytes: number;
@@ -119,8 +126,17 @@ export type MarkdownResourceGraphFailureReason =
   | ResourceTreeSessionFailureReason
   | ResourceTreeSessionMemberReadFailureReason;
 export type MarkdownResourceGraphResult =
-  | Readonly<{ ok: true; documentText: string; graph: MarkdownResourceGraph }>
-  | Readonly<{ ok: true; documentText: string }>
+  | Readonly<{
+      ok: true;
+      documentText: string;
+      resourceFindings: readonly BundledResourceNameFinding[];
+      graph: MarkdownResourceGraph;
+    }>
+  | Readonly<{
+      ok: true;
+      documentText: string;
+      resourceFindings: readonly BundledResourceNameFinding[];
+    }>
   | Readonly<{ ok: false; reason: MarkdownResourceGraphFailureReason }>;
 
 type Failure = Extract<MarkdownResourceGraphResult, Readonly<{ ok: false }>>;
@@ -135,6 +151,7 @@ type ReplayEntry = Readonly<{
   layout: object;
   metadata: object;
   role: CapturedResourceTreeEntry["role"];
+  exactName: string;
   relativePath: string;
   size: bigint;
 }>;
@@ -199,6 +216,8 @@ const stringCharCodeAtSnapshot = String.prototype.charCodeAt;
 const stringIndexOfSnapshot = String.prototype.indexOf;
 const stringSliceSnapshot = String.prototype.slice;
 const stringSplitSnapshot = String.prototype.split;
+const weakSetAddSnapshot = WeakSet.prototype.add;
+const weakSetHasSnapshot = WeakSet.prototype.has;
 const isPromiseSnapshot = types.isPromise;
 const isProxySnapshot = types.isProxy;
 const sampleSignalSnapshot = sampleAbortSignal;
@@ -213,8 +232,11 @@ const analyzeSnapshot = analyzeMarkdown;
 const genuineAnalysisSnapshot = isGenuineMarkdownAnalysis;
 const destinationSnapshot = classifyMarkdownDestination;
 const canonicalComponentSnapshot = isCanonicalDecodedMarkdownLocalComponent;
+const classifyResourceNameSnapshot = classifyBundledResourceFileName;
+const genuineResourceNameClassificationSnapshot = isGenuineBundledResourceFileNameClassification;
 const generatorNextSnapshot = (function* () {})().next;
 const ABSENT = objectFreezeSnapshot({ absent: true } as const);
+const resourceFindingArrays = new WeakSet<object>();
 const MAX_SAFE_INTEGER = 9_007_199_254_740_991;
 const MAX_SKILL_DOCUMENT_BYTES_BIGINT = 524_288n;
 const SESSION_FAILURES =
@@ -264,6 +286,19 @@ function copy<T>(values: readonly T[]): readonly T[] {
   for (let ordinal = 0; ordinal < values.length; ordinal += 1)
     defineSlot(result, ordinal, values[ordinal] as T);
   return freeze(result);
+}
+function registerResourceFindings(
+  values: readonly BundledResourceNameFinding[],
+): readonly BundledResourceNameFinding[] {
+  applyIntrinsic<WeakSet<object>>(weakSetAddSnapshot, resourceFindingArrays, [values]);
+  return values;
+}
+/** Accept only complete finding inventories produced by this module. */
+export function isGenuineBundledResourceNameFindings(
+  value: unknown,
+): value is readonly BundledResourceNameFinding[] {
+  if ((typeof value !== "object" && typeof value !== "function") || value === null) return false;
+  return applyIntrinsic<boolean>(weakSetHasSnapshot, resourceFindingArrays, [value]);
 }
 function ownDescriptor(value: object, property: PropertyKey): PropertyDescriptor | undefined {
   return applyIntrinsic<PropertyDescriptor | undefined>(
@@ -437,6 +472,7 @@ function replaySession(session: ResourceTreeSession): EntryReplay | Failure {
       const role = ownData(entry, "role");
       const layout = ownData(entry, "layout");
       const metadata = ownData(entry, "metadata");
+      const exactName = isPlainRecord(layout) ? ownData(layout, "exactName") : ABSENT;
       const relativePath = isPlainRecord(layout) ? ownData(layout, "relativePath") : ABSENT;
       if (
         (role !== "document" && role !== "resource-file" && role !== "directory") ||
@@ -446,6 +482,7 @@ function replaySession(session: ResourceTreeSession): EntryReplay | Failure {
           ownData(layout, "entryIndex"),
           ordinal,
         ]) ||
+        typeof exactName !== "string" ||
         typeof relativePath !== "string"
       ) {
         return failure("inconsistent");
@@ -462,13 +499,16 @@ function replaySession(session: ResourceTreeSession): EntryReplay | Failure {
         layout,
         metadata,
         role: role as ReplayEntry["role"],
+        exactName,
         relativePath,
         size,
       });
       append(entries, replayed);
       if (role === "document") {
         if (documentIndex >= 0) return failure("inconsistent");
-        if (replayed.relativePath !== "SKILL.md") return failure("inconsistent");
+        if (replayed.exactName !== "SKILL.md" || replayed.relativePath !== "SKILL.md") {
+          return failure("inconsistent");
+        }
         documentIndex = ordinal;
       }
     }
@@ -643,6 +683,7 @@ function boundEntry(state: GraphState, entryIndex: number): ReplayEntry | undefi
         ownData(entry.layout, "entryIndex"),
         entryIndex,
       ]) ||
+      ownData(entry.layout, "exactName") !== entry.exactName ||
       ownData(entry.layout, "relativePath") !== entry.relativePath ||
       ownData(entry.metadata, "size") !== entry.size ||
       ownData(entry.metadata, "kind") !== (entry.role === "directory" ? "directory" : "file")
@@ -657,6 +698,39 @@ function replayIntact(state: GraphState): boolean {
   for (let entryIndex = 0; entryIndex < state.entries.length; entryIndex += 1)
     if (boundEntry(state, entryIndex) === undefined) return false;
   return true;
+}
+
+function scanBundledResourceNames(
+  state: GraphState,
+  signal: unknown,
+): readonly BundledResourceNameFinding[] | Failure {
+  const findings = new arrayConstructorSnapshot<BundledResourceNameFinding>();
+  for (let entryIndex = 0; entryIndex < state.entries.length; entryIndex += 1) {
+    const entry = boundEntry(state, entryIndex);
+    if (entry === undefined) return failure("inconsistent");
+    if (entry.role !== "resource-file") continue;
+
+    const classified = invoke(classifyResourceNameSnapshot, [entry.exactName]);
+    const afterClassification = checkpoint(signal);
+    if (afterClassification !== undefined) return afterClassification;
+    if (!classified.ok) return failure("inconsistent");
+
+    const genuine = invoke(genuineResourceNameClassificationSnapshot, [classified.value]);
+    const afterPredicate = checkpoint(signal);
+    if (afterPredicate !== undefined) return afterPredicate;
+    if (!genuine.ok || genuine.value !== true || !isPlainRecord(classified.value)) {
+      return failure("inconsistent");
+    }
+
+    const ok = ownData(classified.value, "ok");
+    if (ok === true) continue;
+    const reason = ownData(classified.value, "reason");
+    if (ok !== false || (reason !== "environment_file" && reason !== "credential_file")) {
+      return failure("inconsistent");
+    }
+    append(findings, freeze({ kind: reason, file: entry.relativePath }));
+  }
+  return registerResourceFindings(copy(findings));
 }
 
 function normalizeRead(value: unknown): ReadResult {
@@ -1178,14 +1252,25 @@ function* build(
   if (!isPlainRecord(index)) return failure("inconsistent");
   const documentIndex = replay.documentIndex;
   const state = initializeState(session, index as ResourceTreePathIndex, replay, documentIndex);
+  const resourceFindings = scanBundledResourceNames(state, signalValue);
+  if (isFailure(resourceFindings)) return resourceFindings;
+  const resourceReplayIntact = replayIntact(state);
+  const afterResourceScan = checkpoint(signalValue);
+  if (afterResourceScan !== undefined) return afterResourceScan;
+  if (!resourceReplayIntact) return failure("inconsistent");
   const visited = (yield routineCall(
     visitDocument(state, documentIndex, 0, undefined, signalValue),
   )) as Failure | undefined;
   if (visited !== undefined) return visited;
   if (state.documentText === undefined) return failure("inconsistent");
   const result: MarkdownResourceGraphResult = state.graphUnavailable
-    ? barrier({ ok: true, documentText: state.documentText })
-    : barrier({ ok: true, documentText: state.documentText, graph: freezeGraph(state) });
+    ? barrier({ ok: true, documentText: state.documentText, resourceFindings })
+    : barrier({
+        ok: true,
+        documentText: state.documentText,
+        resourceFindings,
+        graph: freezeGraph(state),
+      });
   const currentFailure = (yield routineCall(finalCurrent(state, signalValue))) as
     | Failure
     | undefined;

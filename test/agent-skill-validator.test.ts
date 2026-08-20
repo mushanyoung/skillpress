@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -223,11 +223,21 @@ describe("Agent Skill metadata validation", () => {
       skillDocument("name: property-tax-shape\ndescription: A useful property tax skill.", body),
     );
     const references = join(fixture.directory, "references");
+    const assets = join(fixture.directory, "assets");
+    const scripts = join(fixture.directory, "scripts");
     await mkdir(references);
+    await mkdir(assets);
+    await mkdir(scripts);
     await Promise.all([
       writeFile(join(references, "methodology.md"), "# Methodology\n\nMethodology details.\n"),
       writeFile(join(references, "appeal-routes.md"), "# Appeal routes\n\nAppeal details.\n"),
       writeFile(join(references, "case-schema.md"), "# Case schema\n\nSchema details.\n"),
+      writeFile(join(assets, "case-template.json"), "{}"),
+      writeFile(join(assets, "case-example.json"), "{}"),
+      writeFile(join(scripts, "lookup_jurisdiction.py"), "# inert"),
+      writeFile(join(scripts, "build_appeal_packet.py"), "# inert"),
+      writeFile(join(scripts, "url_safety.py"), "# inert"),
+      writeFile(join(scripts, "requirements.lock"), "# inert"),
     ]);
 
     const graph = await resourceGraph(fixture.directory);
@@ -323,6 +333,46 @@ describe("Agent Skill metadata validation", () => {
     });
   });
 
+  it("reports fixed diagnostics for every retained unsafe resource basename", async () => {
+    const fixture = await fixtures.skill(
+      "unsafe-resources",
+      skillDocument("name: unsafe-resources\ndescription: Unsafe resources.\nlicense: MIT"),
+    );
+    const nested = join(fixture.directory, "nested");
+    await mkdir(nested);
+    await mkdir(join(nested, ".env.directory"));
+    await mkdir(join(fixture.directory, "duplicate"));
+    await mkdir(join(fixture.directory, "directory-only"));
+    await mkdir(join(fixture.directory, "directory-only", ".env.production"));
+    await writeFile(join(fixture.directory, "duplicate", ".env.production"), "private value");
+    await writeFile(join(nested, ".env.production"), "private value");
+    await writeFile(join(nested, "private.PEM"), "private key");
+    const report = await validateAgentSkill(fixture.directory);
+    expect(report.diagnostics).toEqual([
+      {
+        code: "skill.resources.environment_file",
+        severity: "error",
+        scope: "skillpress",
+        file: "duplicate/.env.production",
+        message: "skill resource tree must not contain environment files",
+      },
+      {
+        code: "skill.resources.environment_file",
+        severity: "error",
+        scope: "skillpress",
+        file: "nested/.env.production",
+        message: "skill resource tree must not contain environment files",
+      },
+      {
+        code: "skill.resources.credential_file",
+        severity: "error",
+        scope: "skillpress",
+        file: "nested/private.PEM",
+        message: "skill resource tree must not contain credential-like files",
+      },
+    ]);
+  });
+
   it("reports safe fixed diagnostics for broken local Markdown resources", async () => {
     const body = `${[
       "# Broken resources",
@@ -344,6 +394,7 @@ describe("Agent Skill metadata validation", () => {
     await mkdir(references);
     await writeFile(join(references, "method.md"), "# Method\n");
     await writeFile(join(references, "bad.md"), Uint8Array.from([0xc3, 0x28]));
+    await writeFile(join(fixture.directory, ".env.local"), "private value");
 
     const graph = await resourceGraph(fixture.directory);
     expect(graph.complete).toBe(false);
@@ -368,6 +419,13 @@ describe("Agent Skill metadata validation", () => {
       schemaVersion: 1,
       ok: false,
       diagnostics: [
+        {
+          code: "skill.resources.environment_file",
+          severity: "error",
+          scope: "skillpress",
+          file: ".env.local",
+          message: "skill resource tree must not contain environment files",
+        },
         {
           code: "skill.reference.missing",
           severity: "error",
@@ -444,6 +502,7 @@ describe("Agent Skill metadata validation", () => {
 
   it("diagnoses graphless envelopes once and preserves graph findings after YAML failure", async () => {
     const plain = await fixtures.skill("plain-document", "plain Markdown\n");
+    await writeFile(join(plain.directory, ".env"), "private value");
     const descriptor = Object.getOwnPropertyDescriptor(Object.prototype, "graph");
     let inheritedReads = 0;
     let plainReport: Awaited<ReturnType<typeof validateAgentSkill>> | undefined;
@@ -466,6 +525,13 @@ describe("Agent Skill metadata validation", () => {
       ok: false,
       diagnostics: [
         {
+          code: "skill.resources.environment_file",
+          severity: "error",
+          scope: "skillpress",
+          file: ".env",
+          message: "skill resource tree must not contain environment files",
+        },
+        {
           code: "skill.frontmatter.missing",
           severity: "error",
           scope: "agent-skills",
@@ -481,9 +547,11 @@ describe("Agent Skill metadata validation", () => {
       "yaml-and-resource",
       "---\nname: [unterminated\n---\n[missing](missing.md)\n",
     );
+    await writeFile(join(malformed.directory, ".env"), "private value");
     const report = await validateAgentSkill(malformed.directory);
     const codes = diagnosticCodes(report);
     expect(codes.filter((code) => code === "skill.frontmatter.yaml")).toHaveLength(1);
+    expect(codes.filter((code) => code === "skill.resources.environment_file")).toHaveLength(1);
     expect(codes.filter((code) => code === "skill.reference.missing")).toHaveLength(1);
   });
 
@@ -496,13 +564,19 @@ describe("Agent Skill metadata validation", () => {
       "diagnostic-priority",
       skillDocument("license: MIT", `${links}\n`),
     );
+    await Promise.all(
+      Array.from({ length: MAX_SKILL_DIAGNOSTICS - 3 }, (_, index) =>
+        writeFile(join(fixture.directory, `.env.${index}`), "private value"),
+      ),
+    );
     const report = await validateAgentSkill(fixture.directory);
     const codes = diagnosticCodes(report);
     expect(report.diagnostics).toHaveLength(MAX_SKILL_DIAGNOSTICS);
     expect(codes).toContain("skill.name.required");
     expect(codes).toContain("skill.description.required");
     expect(codes).toContain("skill.diagnostics.truncated");
-    expect(codes.filter((code) => code === "skill.reference.missing")).toHaveLength(253);
+    expect(codes.filter((code) => code === "skill.resources.environment_file")).toHaveLength(253);
+    expect(codes.filter((code) => code === "skill.reference.missing")).toHaveLength(0);
   });
 
   it("keeps legacy root and document failure codes on the graph-backed path", async () => {
@@ -561,6 +635,72 @@ describe("Agent Skill metadata validation", () => {
       vi.doUnmock("../src/validate/skill-document-read.js");
       vi.resetModules();
     }
+  });
+
+  it("fails closed on absent or foreign resource finding inventories without observing them", async () => {
+    const fixture = await fixtures.skill(
+      "foreign-findings",
+      skillDocument("name: foreign-findings\ndescription: Foreign findings.\nlicense: MIT"),
+    );
+    const graphPath = "../src/validate/markdown-resource-graph.js";
+    const mapperPath = "../src/validate/markdown-resource-diagnostics.js";
+    const genuine = Object.freeze([]);
+    const clone = Object.freeze([
+      Object.freeze({ kind: "environment_file", file: "private-clone.env" }),
+    ]);
+    let getterReads = 0;
+    let mapperCalls = 0;
+    let produced: object = {};
+    vi.resetModules();
+    vi.doMock(graphPath, async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/validate/markdown-resource-graph.js")>()),
+      buildInspectedMarkdownResourceGraph: async () => produced,
+      isGenuineBundledResourceNameFindings: (value: unknown) => value === genuine,
+    }));
+    vi.doMock(mapperPath, async (importOriginal) => ({
+      ...(await importOriginal<
+        typeof import("../src/validate/markdown-resource-diagnostics.js")
+      >()),
+      addBundledResourceNameFindingDiagnostics: () => {
+        mapperCalls += 1;
+        throw new Error("invalid resource findings reached the mapper");
+      },
+    }));
+    try {
+      const isolated = await import("../src/validate/agent-skill.js");
+      const base = { ok: true, documentText: await readFile(fixture.path, "utf8") };
+      const inherited = Object.assign(Object.create({ resourceFindings: genuine }), base);
+      const accessor = { ...base };
+      Object.defineProperty(accessor, "resourceFindings", {
+        get() {
+          getterReads += 1;
+          throw new Error("resource findings accessor was invoked");
+        },
+      });
+      const proxied = new Proxy(genuine, {
+        get() {
+          getterReads += 1;
+          throw new Error("foreign Proxy was observed");
+        },
+      });
+      for (produced of [
+        base,
+        inherited,
+        accessor,
+        { ...base, resourceFindings: clone },
+        { ...base, resourceFindings: proxied },
+      ]) {
+        const report = await isolated.validateAgentSkill(fixture.directory);
+        expect(diagnosticCodes(report)).toEqual(["skill.resources.read"]);
+        expect(JSON.stringify(report)).not.toContain("private-clone");
+      }
+    } finally {
+      vi.doUnmock(graphPath);
+      vi.doUnmock(mapperPath);
+      vi.resetModules();
+    }
+    expect(getterReads).toBe(0);
+    expect(mapperCalls).toBe(0);
   });
 
   it("rejects invalid runtime API inputs", async () => {

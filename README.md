@@ -45,7 +45,7 @@ const report = await validateAgentSkill("./skills/my-skill", { expectedName: "my
 ```
 
 Validation creates a bounded resource-tree observation and rechecks it before publishing a result,
-without executing the skill. It recursively analyzes only local Markdown files reached by
+without executing the skill. It also checks every retained regular resource-file basename for conventional environment- or credential-like names without reading unlinked contents. It recursively analyzes only local Markdown files reached by
 CommonMark links; local images and non-Markdown links are existence-checked, while code spans, bare
 paths, and raw HTML are not followed. External URLs are not fetched, and fragment anchors are not
 validated. Missing, unsafe, ambiguous, unreadable, or over-budget resources produce deterministic
