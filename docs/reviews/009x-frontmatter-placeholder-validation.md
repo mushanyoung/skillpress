@@ -5,10 +5,14 @@
 - Date: 2026-08-20
 - Frozen base: `6892602738226dbafa11c6ffb464aa34b01e1134`
 - Released candidate: `c1ad9906b707faa074bb4ea1efa440dbf8fee43a`
-- Final result: PASS
+- Final result: `009x delta: PASS`
 
 This record is a later docs-only addition. It changes none of the three frozen candidate paths and
 was not present in the verified 195-entry tarball.
+
+That result is limited to the 009x delta. The base already contains a raw-retention issue in the
+`windowsReservedKey` regular-expression path; 009y tracks its replacement. The issue was not
+introduced by 009x and is not included in this PASS determination.
 
 ## Scope and semantic authority
 
@@ -90,8 +94,9 @@ single-quoted, double-quoted escape, literal, folded, LF, and CRLF values; exact
 blank-field coexistence; missing, non-string, malformed, and excluded-field zero-call cases;
 description-before-compatibility order; graph-brand gating; atomic late failure; continued body and
 reference diagnostics; raw absence; genuine, foreign, cloned, malformed, active/revoked proxy, and
-accessor results; captured callbacks and intrinsics; exact cap priority; and post-callback poisoning
-of `Map.prototype.get` and `Array.prototype[Symbol.iterator]`.
+accessor results; captured callbacks and intrinsics; exact cap priority; persistent post-callback
+poisoning of `Map.prototype.get`; and a counted delegating replacement of
+`Array.prototype[Symbol.iterator]`.
 
 The shared authored gates passed targeted format, lint, strict TypeScript, focused execution, and
 module coverage. The detached release at
@@ -146,25 +151,29 @@ dependency, or CI dependency.
 The 188-line hostile oracle in the same directory has SHA-256
 `34c32d58c7ca67f8fbedf4d7fa8dc1defa55bbb7de53a0a8dc8744960afdae2d`. On all three supported
 Node versions it verifies decoded forms, inventory-failure semantic zero-calls, two callback calls
-under captured-intrinsic pollution, exactly one legitimate collector iterator call, atomic late
-failure, continued B1 body/reference mapping, and raw-free output. Its harness-only compiled agent
-copy differs from the candidate solely by two import specifiers that select private semantic and
-graph wrappers; none of these artifacts ships.
+under captured-intrinsic pollution, a persistent delegating array-iterator wrapper counted at
+exactly one legitimate collector call, atomic late failure, continued B1 body/reference mapping,
+and non-retention of the late failure cause. Its harness-only compiled agent copy differs
+semantically from the candidate only in two import specifiers that select private semantic and
+graph wrappers; a byte comparison additionally detects its final newline. None of these artifacts
+ships.
 
 ## Harness incidents and frozen artifacts
 
 All harness corrections were recorded and rerun:
 
-- one read-only `npm --version` audit command ran from the shared cwd but performed no install,
-  lifecycle, or write;
+- one read-only `npm --version` environment probe ran from the shared cwd but performed no
+  install, lifecycle, or write;
 - an initial consumer skill under macOS `/var` correctly failed the symlink-root policy before the
   harness switched to canonical `/private/tmp`;
-- the TypeScript consumer initially lacked consumer-local `@types/node` and passed after correction;
-- a review consumer without its own `package.json` let npm walk upward and install under an
-  unrelated `/private/tmp` root; a fresh isolated package/cache was created, dependency resolution
-  was verified, and every affected check was rerun;
-- a review zsh harness reused the reserved `path` variable, then switched to a task-specific name;
-  and
+- the TypeScript consumer initially omitted Node types; the corrected command used explicit
+  `--typeRoots` and `--types` with the candidate's locked `@types/node`, without a consumer-local
+  installation;
+- a review consumer without its own `package.json` let npm walk upward and replace the
+  `/private/tmp` root's prior q0c tarball dependency; a fresh isolated package/cache was created,
+  dependency resolution was verified, and every affected check was rerun;
+- a review zsh harness reused the reserved `path` variable, causing its latter two hash commands to
+  fail with `command not found`; it switched to a task-specific name and reran those commands; and
 - the separate hostile holdout initially used `os.tmpdir()` and reproduced the `/var` symlink
   rejection; it switched to explicit `/private/tmp` and reran all three Node versions.
 
