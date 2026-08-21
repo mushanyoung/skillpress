@@ -6,13 +6,16 @@ import { parseAgentSkillFrontmatter } from "./frontmatter.js";
 import {
   buildInspectedMarkdownResourceGraph,
   isGenuineBundledResourceNameFindings,
+  isGenuineMarkdownResourcePlaceholderFindings,
   type BundledResourceNameFinding,
   type MarkdownResourceGraph,
+  type MarkdownResourcePlaceholderFinding,
 } from "./markdown-resource-graph.js";
 import {
   addBundledResourceNameFindingDiagnostics,
   addMarkdownResourceGraphFailureDiagnostic,
   addMarkdownResourceGraphFindingDiagnostics,
+  addMarkdownResourcePlaceholderFindingDiagnostics,
 } from "./markdown-resource-diagnostics.js";
 import { validateSupplementalMetadata } from "./metadata-rules.js";
 import { inspectAgentSkillDocument } from "./skill-document.js";
@@ -34,6 +37,7 @@ const buildGraphSnapshot = buildInspectedMarkdownResourceGraph;
 const inspectDocumentSnapshot = inspectAgentSkillDocument;
 const inspectRootSnapshot = inspectAgentSkillRoot;
 const genuineResourceFindingsSnapshot = isGenuineBundledResourceNameFindings;
+const genuinePlaceholderFindingsSnapshot = isGenuineMarkdownResourcePlaceholderFindings;
 const objectGetOwnPropertyDescriptorSnapshot = Object.getOwnPropertyDescriptor;
 
 function error(
@@ -200,15 +204,17 @@ function ownGraph(value: object): MarkdownResourceGraph | undefined {
   return valueDescriptor?.value as MarkdownResourceGraph | undefined;
 }
 
-function ownResourceFindings(value: object): readonly BundledResourceNameFinding[] | undefined {
+function ownFindingInventory<T>(
+  value: object,
+  property: string,
+  predicate: (candidate: unknown) => boolean,
+): readonly T[] | undefined {
   try {
-    const descriptor = objectGetOwnPropertyDescriptorSnapshot(value, "resourceFindings");
+    const descriptor = objectGetOwnPropertyDescriptorSnapshot(value, property);
     if (descriptor === undefined) return undefined;
     const valueDescriptor = objectGetOwnPropertyDescriptorSnapshot(descriptor, "value");
     const findings = valueDescriptor?.value;
-    return genuineResourceFindingsSnapshot(findings)
-      ? (findings as readonly BundledResourceNameFinding[])
-      : undefined;
+    return predicate(findings) === true ? (findings as readonly T[]) : undefined;
   } catch {
     return undefined;
   }
@@ -242,12 +248,26 @@ export async function validateAgentSkill(
     parsed === undefined
       ? undefined
       : validateFields(parsed, directoryName, expectedName, diagnostics);
-  const resourceFindings = ownResourceFindings(graphed);
+  const resourceFindings = ownFindingInventory<BundledResourceNameFinding>(
+    graphed,
+    "resourceFindings",
+    genuineResourceFindingsSnapshot,
+  );
   if (resourceFindings === undefined) {
     addMarkdownResourceGraphFailureDiagnostic(diagnostics, "inconsistent");
     return diagnostics.finish(metadata);
   }
+  const placeholderFindings = ownFindingInventory<MarkdownResourcePlaceholderFinding>(
+    graphed,
+    "placeholderFindings",
+    genuinePlaceholderFindingsSnapshot,
+  );
+  if (placeholderFindings === undefined) {
+    addMarkdownResourceGraphFailureDiagnostic(diagnostics, "inconsistent");
+    return diagnostics.finish(metadata);
+  }
   addBundledResourceNameFindingDiagnostics(diagnostics, resourceFindings);
+  addMarkdownResourcePlaceholderFindingDiagnostics(diagnostics, placeholderFindings);
   const graph = ownGraph(graphed);
   if (graph !== undefined) addMarkdownResourceGraphFindingDiagnostics(diagnostics, graph);
   return diagnostics.finish(metadata);

@@ -48,9 +48,12 @@ Validation creates a bounded resource-tree observation and rechecks it before pu
 without executing the skill. It also checks every retained regular resource-file basename for conventional environment- or credential-like names without reading unlinked contents. It recursively analyzes only local Markdown files reached by
 CommonMark links; local images and non-Markdown links are existence-checked, while code spans, bare
 paths, and raw HTML are not followed. External URLs are not fetched, and fragment anchors are not
-validated. Missing, unsafe, ambiguous, unreadable, or over-budget resources produce deterministic
-errors. An `ok: true` report may still contain portability or target-specific warnings; it is not a
-readiness score, an evaluation result, or a publication receipt.
+validated. Within already-read Markdown bodies, validation also rejects placeholders found in
+analyzer-authorized visible text; code spans and blocks, raw HTML, link or image destinations,
+machine identifiers, and `SKILL.md` YAML frontmatter are excluded. Missing, unsafe, ambiguous,
+unreadable, or over-budget resources produce deterministic errors. An `ok: true` report may still
+contain portability or target-specific warnings; it is not a readiness score, an evaluation result,
+or a publication receipt.
 
 SkillPress distinguishes local readiness from Tessl's official Quality and Impact scores. It will
 only report the latter when current Tessl evidence exists, and the release profile defaults to a

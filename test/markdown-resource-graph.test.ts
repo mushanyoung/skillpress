@@ -129,9 +129,45 @@ describe("Markdown resource graph", () => {
     expect(result.ok).toBe(true);
     if (!result.ok || !("graph" in result)) throw new Error("expected graph success");
     expect(result.documentText).toBe(source);
-    expectBarrier(result, ["ok", "documentText", "resourceFindings", "graph"]);
+    expectBarrier(result, [
+      "ok",
+      "documentText",
+      "resourceFindings",
+      "placeholderFindings",
+      "graph",
+    ]);
     expect(result.resourceFindings).toEqual([]);
+    expect(result.placeholderFindings).toEqual([]);
     expect(graphModule.isGenuineBundledResourceNameFindings(result.resourceFindings)).toBe(true);
+    expect(
+      graphModule.isGenuineMarkdownResourcePlaceholderFindings(result.placeholderFindings),
+    ).toBe(true);
+    expect(graphModule.isGenuineBundledResourceNameFindings(result.placeholderFindings)).toBe(
+      false,
+    );
+    expect(graphModule.isGenuineMarkdownResourcePlaceholderFindings(result.resourceFindings)).toBe(
+      false,
+    );
+    expect(
+      graphModule.isGenuineMarkdownResourcePlaceholderFindings([...result.placeholderFindings]),
+    ).toBe(false);
+    let proxyTraps = 0;
+    const handler: ProxyHandler<readonly unknown[]> = {
+      get() {
+        proxyTraps += 1;
+        throw new Error("placeholder brand inspected a Proxy");
+      },
+      getOwnPropertyDescriptor() {
+        proxyTraps += 1;
+        throw new Error("placeholder brand inspected a Proxy");
+      },
+    };
+    const active = new Proxy(result.placeholderFindings, handler);
+    const revoked = Proxy.revocable(result.placeholderFindings, handler);
+    revoked.revoke();
+    expect(graphModule.isGenuineMarkdownResourcePlaceholderFindings(active)).toBe(false);
+    expect(graphModule.isGenuineMarkdownResourcePlaceholderFindings(revoked.proxy)).toBe(false);
+    expect(proxyTraps).toBe(0);
     expect(graphModule.isGenuineBundledResourceNameFindings([...result.resourceFindings])).toBe(
       false,
     );
@@ -193,9 +229,34 @@ describe("Markdown resource graph", () => {
     expect(JSON.stringify(result)).not.toContain(fixture.directory);
   });
 
+  it("projects root-offset and nested placeholder observations in document DFS order", async () => {
+    const source = skillDocument(
+      "name: placeholders\ndescription: Placeholder graph fixture.\nlicense: MIT",
+      ["# TODO", "", "[child](docs/child.md)", "", "PLACEHOLDER", ""].join("\n"),
+    );
+    const fixture = await fixtures.skill("placeholders", source);
+    await mkdir(join(fixture.directory, "docs"));
+    await writeFile(join(fixture.directory, "docs", "child.md"), "TBD\n");
+    const graphModule = await import(graphPath);
+    const result = await graphModule.buildInspectedMarkdownResourceGraph(
+      await inspectDocument(fixture),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok || !("graph" in result)) throw new Error("expected graph success");
+    expect(result.placeholderFindings).toEqual([
+      { file: "SKILL.md", location: { line: 6, column: 1 } },
+      { file: "SKILL.md", location: { line: 10, column: 1 } },
+      { file: "docs/child.md", location: { line: 1, column: 1 } },
+    ]);
+    expect(result.graph.documents.map(({ file }) => file)).toEqual(["SKILL.md", "docs/child.md"]);
+    expect(result.graph.complete).toBe(true);
+    expectDeepFrozen(result.placeholderFindings);
+    expect(JSON.stringify(result.placeholderFindings)).not.toContain("TODO");
+  });
+
   it("returns frozen graphless lexical results and preserves outer session failures", async () => {
     const graphModule = await import(graphPath);
-    const plainFixture = await fixtures.skill("graphless", "plain Markdown\n");
+    const plainFixture = await fixtures.skill("graphless", "TODO\n");
     await mkdir(join(plainFixture.directory, "nested"));
     await writeFile(join(plainFixture.directory, "nested", ".ENV.local"), Buffer.from([0xff]));
     await writeFile(join(plainFixture.directory, "nested", "secret.PEM"), "x".repeat(524_289));
@@ -203,13 +264,18 @@ describe("Markdown resource graph", () => {
     const graphless = await graphModule.buildInspectedMarkdownResourceGraph(plain.document);
     expect(graphless).toEqual({
       ok: true,
-      documentText: "plain Markdown\n",
+      documentText: "TODO\n",
       resourceFindings: [
         { kind: "environment_file", file: "nested/.ENV.local" },
         { kind: "credential_file", file: "nested/secret.PEM" },
       ],
+      placeholderFindings: [],
     });
-    expectBarrier(graphless, ["ok", "documentText", "resourceFindings"]);
+    expectBarrier(graphless, ["ok", "documentText", "resourceFindings", "placeholderFindings"]);
+    if (!graphless.ok) throw new Error("expected graphless success");
+    expect(
+      graphModule.isGenuineMarkdownResourcePlaceholderFindings(graphless.placeholderFindings),
+    ).toBe(true);
     expectDeepFrozen(graphless);
 
     const hugeSource = skillDocument(
@@ -241,6 +307,7 @@ type MockAnalysis = Readonly<{
   nodeCount: number;
   targets: readonly ReturnType<typeof mockTarget>[];
   issues: readonly ReturnType<typeof mockIssue>[];
+  placeholderFindings: readonly ReturnType<typeof mockPlaceholder>[];
 }>;
 type FileSpec = Readonly<{
   path: string;
@@ -272,6 +339,10 @@ function rawEntry(
 
 function mockLocation(line = 1, column = 1) {
   return Object.freeze({ line, column });
+}
+
+function mockPlaceholder(line = 1, column = 1) {
+  return Object.freeze({ location: mockLocation(line, column) });
 }
 
 function mockTarget(
@@ -318,17 +389,20 @@ const EMPTY_ANALYSIS = Object.freeze({
   nodeCount: 1,
   targets: Object.freeze([]),
   issues: Object.freeze([]),
+  placeholderFindings: Object.freeze([]),
 }) as MockAnalysis;
 
 function mockAnalysis(
   targets: readonly ReturnType<typeof mockTarget>[] = [],
   issues: readonly ReturnType<typeof mockIssue>[] = [],
   nodeCount = 1,
+  placeholderFindings: readonly ReturnType<typeof mockPlaceholder>[] = [],
 ): MockAnalysis {
   return Object.freeze({
     nodeCount,
     targets: Object.freeze([...targets]),
     issues: Object.freeze([...issues]),
+    placeholderFindings: Object.freeze([...placeholderFindings]),
   });
 }
 
@@ -898,6 +972,177 @@ describe("isolated Markdown resource graph producers", () => {
     expect(budget.calls.current).toHaveLength(1);
   });
 
+  it("normalizes branded analysis placeholder data without imposing container prototypes", async () => {
+    const state = makeState([{ path: "SKILL.md", text: MOCK_ROOT }]);
+    const inventory = runInNewContext(`(() => {
+      const location = Object.assign(Object.create({ inherited: "private" }), {
+        line: 1,
+        column: 2,
+      });
+      const finding = Object.assign(Object.create({ raw: "TODO private" }), { location });
+      return Object.assign(Object.create({ marker: "private" }), {
+        0: finding,
+        1: { location: { line: 5, column: 5 } },
+        length: 2,
+      });
+    })()`);
+    const analysis = Object.freeze({
+      nodeCount: 2,
+      targets: Object.freeze([]),
+      issues: Object.freeze([]),
+      placeholderFindings: inventory,
+    });
+    state.analyzeImpl = () => analysis;
+    state.genuineAnalysisImpl = (value) => value === analysis;
+    const graphModule = await mockedGraph(state);
+    const result = await graphModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected graph success");
+    expect(result.placeholderFindings).toEqual([
+      { file: "SKILL.md", location: { line: 6, column: 2 } },
+      { file: "SKILL.md", location: { line: 10, column: 5 } },
+    ]);
+    expect(JSON.stringify(result.placeholderFindings)).not.toContain("private");
+  });
+
+  it("rejects malformed placeholder transports before observation or publication", async () => {
+    let proxyTraps = 0;
+    const hostile = (revoked: boolean) => {
+      const proxy = Proxy.revocable(
+        {},
+        {
+          get() {
+            proxyTraps += 1;
+            throw new Error("placeholder transport read a Proxy");
+          },
+          getOwnPropertyDescriptor() {
+            proxyTraps += 1;
+            throw new Error("placeholder transport described a Proxy");
+          },
+        },
+      );
+      if (revoked) proxy.revoke();
+      return proxy.proxy;
+    };
+    const safeLocation = { line: 1, column: 1 };
+    const safeFinding = { location: safeLocation };
+    let accessorReads = 0;
+    const accessor = (target: object, property: PropertyKey) =>
+      Object.defineProperty(target, property, {
+        get() {
+          accessorReads += 1;
+          throw new Error("placeholder transport invoked an accessor");
+        },
+      });
+    const invalidInventories = [
+      undefined,
+      Object.create({ length: 0 }),
+      { length: 2, 0: safeFinding },
+      { length: 1 },
+      { 0: { location: { line: 0, column: 1 } }, length: 1 },
+      { 0: { location: { line: 1, column: 6 } }, length: 1 },
+      { 0: { location: { line: 6, column: 1 } }, length: 1 },
+      accessor({}, "length"),
+      accessor({ length: 1 }, 0),
+      { 0: accessor({}, "location"), length: 1 },
+      { 0: { location: accessor({ column: 1 }, "line") }, length: 1 },
+      { 0: { location: accessor({ line: 1 }, "column") }, length: 1 },
+      hostile(false),
+      hostile(true),
+      { 0: hostile(false), length: 1 },
+      { 0: hostile(true), length: 1 },
+      { 0: { location: hostile(false) }, length: 1 },
+      { 0: { location: hostile(true) }, length: 1 },
+    ];
+    for (const placeholderFindings of invalidInventories) {
+      const state = makeState([{ path: "SKILL.md", text: MOCK_ROOT }]);
+      const analysis = {
+        nodeCount: 1,
+        targets: Object.freeze([]),
+        issues: Object.freeze([]),
+        ...(placeholderFindings === undefined ? {} : { placeholderFindings }),
+      };
+      state.analyzeImpl = () => analysis;
+      state.genuineAnalysisImpl = (value) => value === analysis;
+      await expectMockFailure(state);
+      expect(state.calls.current).toHaveLength(0);
+    }
+    expect(proxyTraps).toBe(0);
+
+    const state = makeState([{ path: "SKILL.md", text: MOCK_ROOT }]);
+    const analysis = { nodeCount: 1, targets: [], issues: [] };
+    Object.defineProperty(analysis, "placeholderFindings", {
+      get() {
+        accessorReads += 1;
+        throw new Error("placeholder accessor was invoked");
+      },
+    });
+    state.analyzeImpl = () => analysis;
+    state.genuineAnalysisImpl = (value) => value === analysis;
+    await expectMockFailure(state);
+    expect(accessorReads).toBe(0);
+  });
+
+  it("prioritizes node budget and predicate cancellation before placeholder slot zero", async () => {
+    let slotReads = 0;
+    const inventory = new Proxy(
+      { 0: mockPlaceholder(), length: 1 },
+      {
+        getOwnPropertyDescriptor() {
+          slotReads += 1;
+          throw new Error("placeholder inventory was inspected");
+        },
+      },
+    );
+    const oversized = makeState([{ path: "SKILL.md", text: MOCK_ROOT }]);
+    const oversizedAnalysis = {
+      nodeCount: 100_001,
+      targets: [],
+      issues: [],
+      placeholderFindings: inventory,
+    };
+    oversized.analyzeImpl = () => oversizedAnalysis;
+    oversized.genuineAnalysisImpl = (value) => value === oversizedAnalysis;
+    const oversizedModule = await mockedGraph(oversized);
+    const bounded = await oversizedModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT);
+    expect(bounded.ok).toBe(true);
+    if (!bounded.ok || !("graph" in bounded)) throw new Error("expected bounded graph success");
+    expect(bounded.placeholderFindings).toEqual([]);
+    expect(bounded.graph.complete).toBe(false);
+
+    const cancelled = makeState([{ path: "SKILL.md", text: MOCK_ROOT }]);
+    const cancelledAnalysis = { ...oversizedAnalysis, nodeCount: 1 };
+    const controller = new AbortController();
+    cancelled.analyzeImpl = () => cancelledAnalysis;
+    cancelled.genuineAnalysisImpl = () => {
+      controller.abort();
+      return true;
+    };
+    const cancelledModule = await mockedGraph(cancelled);
+    expect(
+      await cancelledModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT, controller.signal),
+    ).toEqual({ ok: false, reason: "aborted" });
+    expect(slotReads).toBe(0);
+  });
+
+  it("retains observed placeholders on incomplete graphs but never publishes transaction failures", async () => {
+    const incomplete = makeState([
+      {
+        path: "SKILL.md",
+        text: MOCK_ROOT,
+        analysis: mockAnalysis([], [mockIssue("skill.markdown.parse")], 1, [mockPlaceholder(1, 1)]),
+      },
+    ]);
+    const incompleteModule = await mockedGraph(incomplete);
+    const observed = await incompleteModule.buildInspectedMarkdownResourceGraph(MOCK_DOCUMENT);
+    expect(observed.ok).toBe(true);
+    if (!observed.ok || !("graph" in observed)) throw new Error("expected incomplete graph");
+    expect(observed.graph.complete).toBe(false);
+    expect(observed.placeholderFindings).toEqual([
+      { file: "SKILL.md", location: { line: 6, column: 1 } },
+    ]);
+  });
+
   it("rejects post-scan inventory mutation before the first member read", async () => {
     const mutations = [
       (entries: MutableMockEntry[]) => (requiredEntry(entries, 1).layout.exactName = "changed"),
@@ -1023,7 +1268,11 @@ describe("isolated Markdown resource graph producers", () => {
     ] as const;
     for (const finalCase of finalCases) {
       const { entries, state } = mutableState([
-        { path: "SKILL.md", text: MOCK_ROOT },
+        {
+          path: "SKILL.md",
+          text: MOCK_ROOT,
+          analysis: mockAnalysis([], [], 1, [mockPlaceholder(1, 1)]),
+        },
         { path: ".env", text: "unread" },
       ]);
       const staged = resourceClassification(state, "environment_file");
@@ -1040,6 +1289,7 @@ describe("isolated Markdown resource graph producers", () => {
       });
       expect(state.calls.current).toHaveLength(1);
       expect(JSON.stringify(finalResult)).not.toContain("environment_file");
+      expect(JSON.stringify(finalResult)).not.toContain("placeholderFindings");
     }
   });
 

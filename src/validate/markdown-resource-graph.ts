@@ -104,6 +104,10 @@ export type MarkdownResourceGraphFinding =
 export type BundledResourceNameFinding =
   | Finding<{ kind: "environment_file" }>
   | Finding<{ kind: "credential_file" }>;
+export type MarkdownResourcePlaceholderFinding = Readonly<{
+  file: string;
+  location: MarkdownResourceGraphLocation;
+}>;
 export type MarkdownResourceGraphTotals = Readonly<{
   files: number;
   bytes: number;
@@ -130,12 +134,14 @@ export type MarkdownResourceGraphResult =
       ok: true;
       documentText: string;
       resourceFindings: readonly BundledResourceNameFinding[];
+      placeholderFindings: readonly MarkdownResourcePlaceholderFinding[];
       graph: MarkdownResourceGraph;
     }>
   | Readonly<{
       ok: true;
       documentText: string;
       resourceFindings: readonly BundledResourceNameFinding[];
+      placeholderFindings: readonly MarkdownResourcePlaceholderFinding[];
     }>
   | Readonly<{ ok: false; reason: MarkdownResourceGraphFailureReason }>;
 
@@ -186,6 +192,7 @@ interface GraphState {
   readonly edges: MarkdownResourceGraphEdge[];
   readonly reachableFiles: string[];
   readonly findings: MarkdownResourceGraphFinding[];
+  readonly placeholderFindings: MarkdownResourcePlaceholderFinding[];
   readonly totals: MutableTotals;
   complete: boolean;
   terminal: boolean;
@@ -237,6 +244,7 @@ const genuineResourceNameClassificationSnapshot = isGenuineBundledResourceFileNa
 const generatorNextSnapshot = (function* () {})().next;
 const ABSENT = objectFreezeSnapshot({ absent: true } as const);
 const resourceFindingArrays = new WeakSet<object>();
+const placeholderFindingArrays = new WeakSet<object>();
 const MAX_SAFE_INTEGER = 9_007_199_254_740_991;
 const MAX_SKILL_DOCUMENT_BYTES_BIGINT = 524_288n;
 const SESSION_FAILURES =
@@ -299,6 +307,19 @@ export function isGenuineBundledResourceNameFindings(
 ): value is readonly BundledResourceNameFinding[] {
   if ((typeof value !== "object" && typeof value !== "function") || value === null) return false;
   return applyIntrinsic<boolean>(weakSetHasSnapshot, resourceFindingArrays, [value]);
+}
+function registerPlaceholderFindings(
+  values: readonly MarkdownResourcePlaceholderFinding[],
+): readonly MarkdownResourcePlaceholderFinding[] {
+  applyIntrinsic<WeakSet<object>>(weakSetAddSnapshot, placeholderFindingArrays, [values]);
+  return values;
+}
+/** Accept only placeholder observations produced by this module. */
+export function isGenuineMarkdownResourcePlaceholderFindings(
+  value: unknown,
+): value is readonly MarkdownResourcePlaceholderFinding[] {
+  if ((typeof value !== "object" && typeof value !== "function") || value === null) return false;
+  return applyIntrinsic<boolean>(weakSetHasSnapshot, placeholderFindingArrays, [value]);
 }
 function ownDescriptor(value: object, property: PropertyKey): PropertyDescriptor | undefined {
   return applyIntrinsic<PropertyDescriptor | undefined>(
@@ -655,6 +676,7 @@ function initializeState(
     edges: new arrayConstructorSnapshot<MarkdownResourceGraphEdge>(),
     reachableFiles,
     findings: new arrayConstructorSnapshot<MarkdownResourceGraphFinding>(),
+    placeholderFindings: new arrayConstructorSnapshot<MarkdownResourcePlaceholderFinding>(),
     totals: {
       files: 0,
       bytes: 0,
@@ -1002,6 +1024,45 @@ function isFailure(value: unknown): value is Failure {
     knownFailureReason(ownData(value, "reason"))
   );
 }
+function projectPlaceholderFindings(
+  state: GraphState,
+  analysis: MarkdownAnalysis,
+  sourceLength: number,
+  nodeCount: number,
+  file: string,
+  lineOffset: number,
+): Failure | undefined {
+  try {
+    const inventory = ownData(analysis, "placeholderFindings");
+    if (!isRecord(inventory)) return failure("inconsistent");
+    const length = ownData(inventory, "length");
+    if (!safeInteger(length, nodeCount)) return failure("inconsistent");
+    const projected = new arrayConstructorSnapshot<MarkdownResourcePlaceholderFinding>();
+    for (let index = 0; index < length; index += 1) {
+      const finding = ownData(inventory, index);
+      if (!isRecord(finding)) return failure("inconsistent");
+      const at = ownData(finding, "location");
+      if (!isRecord(at)) return failure("inconsistent");
+      const line = ownData(at, "line");
+      const column = ownData(at, "column");
+      if (
+        !safeInteger(line, sourceLength + 1) ||
+        line < 1 ||
+        !safeInteger(column, sourceLength + 1) ||
+        column < 1
+      ) {
+        return failure("inconsistent");
+      }
+      append(projected, freeze({ file, location: location(line + lineOffset, column) }));
+    }
+    for (let index = 0; index < projected.length; index += 1) {
+      append(state.placeholderFindings, projected[index] as MarkdownResourcePlaceholderFinding);
+    }
+    return undefined;
+  } catch {
+    return failure("inconsistent");
+  }
+}
 function* analyzeDocument(
   state: GraphState,
   entry: ReplayEntry,
@@ -1025,16 +1086,26 @@ function* analyzeDocument(
   if (afterPredicate !== undefined) return afterPredicate;
   if (!genuine.ok || genuine.value !== true) return failure("inconsistent");
   const analysis = analyzed.value as MarkdownAnalysis;
-  if (!budget(state, "nodes", analysis.nodeCount, file, start)) {
+  const nodeCount = analysis.nodeCount;
+  if (!budget(state, "nodes", nodeCount, file, start)) {
     return undefined;
   }
+  const placeholderFailure = projectPlaceholderFindings(
+    state,
+    analysis,
+    text.length,
+    nodeCount,
+    file,
+    lineOffset,
+  );
+  if (placeholderFailure !== undefined) return placeholderFailure;
   append(
     state.documents,
     freeze({
       file,
       depth,
       byteLength: byteCount,
-      nodeCount: analysis.nodeCount,
+      nodeCount,
       targetCount: analysis.targets.length,
     }),
   );
@@ -1263,12 +1334,14 @@ function* build(
   )) as Failure | undefined;
   if (visited !== undefined) return visited;
   if (state.documentText === undefined) return failure("inconsistent");
+  const placeholderFindings = registerPlaceholderFindings(copy(state.placeholderFindings));
   const result: MarkdownResourceGraphResult = state.graphUnavailable
-    ? barrier({ ok: true, documentText: state.documentText, resourceFindings })
+    ? barrier({ ok: true, documentText: state.documentText, resourceFindings, placeholderFindings })
     : barrier({
         ok: true,
         documentText: state.documentText,
         resourceFindings,
+        placeholderFindings,
         graph: freezeGraph(state),
       });
   const currentFailure = (yield routineCall(finalCurrent(state, signalValue))) as

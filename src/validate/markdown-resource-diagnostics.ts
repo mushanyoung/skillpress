@@ -23,6 +23,7 @@ import {
   type MarkdownResourceGraphFailureReason,
   type MarkdownResourceGraphFinding,
   type MarkdownResourceGraphLocation,
+  type MarkdownResourcePlaceholderFinding,
 } from "./markdown-resource-graph.js";
 import {
   MAX_RESOURCE_TREE_DEPTH,
@@ -197,6 +198,22 @@ export function addBundledResourceNameFindingDiagnostics(
         throw new TypeError("unsupported bundled resource name finding");
       }
     }
+  }
+}
+
+/** Add fixed diagnostics for analyzer-authorized visible-text placeholders. */
+export function addMarkdownResourcePlaceholderFindingDiagnostics(
+  diagnostics: DiagnosticCollector,
+  findings: readonly MarkdownResourcePlaceholderFinding[],
+): void {
+  for (let index = 0; index < findings.length; index += 1) {
+    const finding = findings[index] as MarkdownResourcePlaceholderFinding;
+    add(
+      diagnostics,
+      "skill.markdown.placeholder",
+      "Markdown visible text must not contain placeholders",
+      { file: finding.file, line: finding.location.line, column: finding.location.column },
+    );
   }
 }
 

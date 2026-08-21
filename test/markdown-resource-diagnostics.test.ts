@@ -8,11 +8,13 @@ import type {
   MarkdownResourceGraph,
   MarkdownResourceGraphFailureReason,
   MarkdownResourceGraphFinding,
+  MarkdownResourcePlaceholderFinding,
 } from "../src/validate/markdown-resource-graph.js";
 import {
   addBundledResourceNameFindingDiagnostics,
   addMarkdownResourceGraphFailureDiagnostic,
   addMarkdownResourceGraphFindingDiagnostics,
+  addMarkdownResourcePlaceholderFindingDiagnostics,
 } from "../src/validate/markdown-resource-diagnostics.js";
 
 const SOURCE = "references/source.md";
@@ -50,6 +52,12 @@ function mappedResource(finding: BundledResourceNameFinding) {
   return diagnostics.finish().diagnostics;
 }
 
+function mappedPlaceholder(...findings: readonly MarkdownResourcePlaceholderFinding[]) {
+  const diagnostics = new DiagnosticCollector();
+  addMarkdownResourcePlaceholderFindingDiagnostics(diagnostics, findings);
+  return diagnostics.finish().diagnostics;
+}
+
 function expected(code: string, message: string) {
   return [
     {
@@ -80,6 +88,20 @@ describe("Markdown resource diagnostics", () => {
     expect(mappedResource({ kind, file: SOURCE })).toEqual([
       { code, severity: "error", scope: "skillpress", file: SOURCE, message },
     ]);
+  });
+
+  it("maps placeholder observations to one fixed raw-free diagnostic", () => {
+    const finding = {
+      file: SOURCE,
+      location: LOCATION,
+    } as const;
+    const diagnostic = expected(
+      "skill.markdown.placeholder",
+      "Markdown visible text must not contain placeholders",
+    );
+    const diagnostics = mappedPlaceholder(finding, finding);
+    expect(diagnostics).toEqual([...diagnostic, ...diagnostic]);
+    expect(JSON.stringify(diagnostics)).not.toContain("TODO");
   });
 
   it.each([

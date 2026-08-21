@@ -470,6 +470,40 @@ describe("Agent Skill metadata validation", () => {
     expect(serialized).not.toContain(fixture.directory);
   });
 
+  it("reports ordered raw-free placeholder diagnostics from reachable Markdown", async () => {
+    const fixture = await fixtures.skill(
+      "visible-placeholders",
+      skillDocument(
+        "name: visible-placeholders\ndescription: TODO\nlicense: MIT\ncompatibility: TODO",
+        "# TODO\n\n[guide](references/guide.md)\n",
+      ),
+    );
+    await mkdir(join(fixture.directory, "references"));
+    await writeFile(join(fixture.directory, "references", "guide.md"), "[insert here]\n");
+    const report = await validateAgentSkill(fixture.directory);
+    expect(report.diagnostics).toEqual([
+      {
+        code: "skill.markdown.placeholder",
+        severity: "error",
+        scope: "skillpress",
+        file: "SKILL.md",
+        message: "Markdown visible text must not contain placeholders",
+        line: 7,
+        column: 1,
+      },
+      {
+        code: "skill.markdown.placeholder",
+        severity: "error",
+        scope: "skillpress",
+        file: "references/guide.md",
+        message: "Markdown visible text must not contain placeholders",
+        line: 1,
+        column: 1,
+      },
+    ]);
+    expect(JSON.stringify(report)).not.toContain("insert here");
+  });
+
   it("treats complete missing-target observations as validation errors", async () => {
     const fixture = await fixtures.skill(
       "missing-resource",
@@ -501,7 +535,7 @@ describe("Agent Skill metadata validation", () => {
   });
 
   it("diagnoses graphless envelopes once and preserves graph findings after YAML failure", async () => {
-    const plain = await fixtures.skill("plain-document", "plain Markdown\n");
+    const plain = await fixtures.skill("plain-document", "TODO\n");
     await writeFile(join(plain.directory, ".env"), "private value");
     const descriptor = Object.getOwnPropertyDescriptor(Object.prototype, "graph");
     let inheritedReads = 0;
@@ -545,37 +579,38 @@ describe("Agent Skill metadata validation", () => {
 
     const malformed = await fixtures.skill(
       "yaml-and-resource",
-      "---\nname: [unterminated\n---\n[missing](missing.md)\n",
+      "---\nname: [unterminated\n---\nTODO\n\n[missing](missing.md)\n",
     );
     await writeFile(join(malformed.directory, ".env"), "private value");
     const report = await validateAgentSkill(malformed.directory);
     const codes = diagnosticCodes(report);
     expect(codes.filter((code) => code === "skill.frontmatter.yaml")).toHaveLength(1);
     expect(codes.filter((code) => code === "skill.resources.environment_file")).toHaveLength(1);
+    expect(codes.filter((code) => code === "skill.markdown.placeholder")).toHaveLength(1);
     expect(codes.filter((code) => code === "skill.reference.missing")).toHaveLength(1);
   });
 
   it("admits root diagnostics before bounded graph findings", async () => {
+    const placeholders = Array.from({ length: MAX_SKILL_DIAGNOSTICS - 3 }, () => "# TODO").join(
+      "\n",
+    );
     const links = Array.from(
-      { length: MAX_SKILL_DIAGNOSTICS - 1 },
+      { length: 3 },
       (_, index) => `[missing ${index}](references/missing-${index}.md)`,
     ).join("\n");
     const fixture = await fixtures.skill(
       "diagnostic-priority",
-      skillDocument("license: MIT", `${links}\n`),
+      skillDocument("license: MIT", `${placeholders}\n\n${links}\n`),
     );
-    await Promise.all(
-      Array.from({ length: MAX_SKILL_DIAGNOSTICS - 3 }, (_, index) =>
-        writeFile(join(fixture.directory, `.env.${index}`), "private value"),
-      ),
-    );
+    await writeFile(join(fixture.directory, ".env"), "private value");
     const report = await validateAgentSkill(fixture.directory);
     const codes = diagnosticCodes(report);
     expect(report.diagnostics).toHaveLength(MAX_SKILL_DIAGNOSTICS);
     expect(codes).toContain("skill.name.required");
     expect(codes).toContain("skill.description.required");
     expect(codes).toContain("skill.diagnostics.truncated");
-    expect(codes.filter((code) => code === "skill.resources.environment_file")).toHaveLength(253);
+    expect(codes.filter((code) => code === "skill.resources.environment_file")).toHaveLength(1);
+    expect(codes.filter((code) => code === "skill.markdown.placeholder")).toHaveLength(252);
     expect(codes.filter((code) => code === "skill.reference.missing")).toHaveLength(0);
   });
 
@@ -637,70 +672,174 @@ describe("Agent Skill metadata validation", () => {
     }
   });
 
-  it("fails closed on absent or foreign resource finding inventories without observing them", async () => {
+  it("validates both branded finding inventories before calling any nested mapper", async () => {
     const fixture = await fixtures.skill(
       "foreign-findings",
       skillDocument("name: foreign-findings\ndescription: Foreign findings.\nlicense: MIT"),
     );
     const graphPath = "../src/validate/markdown-resource-graph.js";
     const mapperPath = "../src/validate/markdown-resource-diagnostics.js";
-    const genuine = Object.freeze([]);
-    const clone = Object.freeze([
+    const genuineResource = Object.freeze([]);
+    const genuinePlaceholder = Object.freeze([]);
+    const resourceClone = Object.freeze([
       Object.freeze({ kind: "environment_file", file: "private-clone.env" }),
     ]);
+    const placeholderClone = Object.freeze([
+      Object.freeze({ file: "private.md", location: Object.freeze({ line: 1, column: 1 }) }),
+    ]);
     let getterReads = 0;
-    let mapperCalls = 0;
+    let resourcePredicateCalls = 0;
+    let placeholderPredicateCalls = 0;
+    let resourcePredicateMode: "normal" | "throw" | "truthy" = "normal";
+    let placeholderPredicateMode: "normal" | "throw" | "truthy" = "normal";
+    const mapperCalls: string[] = [];
     let produced: object = {};
     vi.resetModules();
     vi.doMock(graphPath, async (importOriginal) => ({
       ...(await importOriginal<typeof import("../src/validate/markdown-resource-graph.js")>()),
       buildInspectedMarkdownResourceGraph: async () => produced,
-      isGenuineBundledResourceNameFindings: (value: unknown) => value === genuine,
+      isGenuineBundledResourceNameFindings: (value: unknown) => {
+        resourcePredicateCalls += 1;
+        if (resourcePredicateMode === "throw") throw new Error("resource predicate failure");
+        return (resourcePredicateMode === "truthy"
+          ? { truthy: true }
+          : value === genuineResource) as unknown as boolean;
+      },
+      isGenuineMarkdownResourcePlaceholderFindings: (value: unknown) => {
+        placeholderPredicateCalls += 1;
+        if (placeholderPredicateMode === "throw") throw new Error("placeholder predicate failure");
+        return (placeholderPredicateMode === "truthy"
+          ? { truthy: true }
+          : value === genuinePlaceholder) as unknown as boolean;
+      },
     }));
     vi.doMock(mapperPath, async (importOriginal) => ({
       ...(await importOriginal<
         typeof import("../src/validate/markdown-resource-diagnostics.js")
       >()),
       addBundledResourceNameFindingDiagnostics: () => {
-        mapperCalls += 1;
-        throw new Error("invalid resource findings reached the mapper");
+        mapperCalls.push("resource");
+      },
+      addMarkdownResourcePlaceholderFindingDiagnostics: () => {
+        mapperCalls.push("placeholder");
+      },
+      addMarkdownResourceGraphFindingDiagnostics: () => {
+        mapperCalls.push("graph");
       },
     }));
     try {
       const isolated = await import("../src/validate/agent-skill.js");
       const base = { ok: true, documentText: await readFile(fixture.path, "utf8") };
-      const inherited = Object.assign(Object.create({ resourceFindings: genuine }), base);
-      const accessor = { ...base };
-      Object.defineProperty(accessor, "resourceFindings", {
+      const accessor = (property: "resourceFindings" | "placeholderFindings") =>
+        Object.defineProperty(
+          {
+            ...base,
+            resourceFindings: genuineResource,
+            placeholderFindings: genuinePlaceholder,
+          },
+          property,
+          {
+            get() {
+              getterReads += 1;
+              throw new Error("finding inventory accessor was invoked");
+            },
+          },
+        );
+      const proxiedResource = new Proxy(genuineResource, {
         get() {
           getterReads += 1;
-          throw new Error("resource findings accessor was invoked");
+          throw new Error("foreign resource Proxy was observed");
         },
       });
-      const proxied = new Proxy(genuine, {
+      const proxiedPlaceholder = new Proxy(genuinePlaceholder, {
         get() {
           getterReads += 1;
-          throw new Error("foreign Proxy was observed");
+          throw new Error("foreign placeholder Proxy was observed");
         },
       });
-      for (produced of [
+      const invalidResourceCases = [
         base,
-        inherited,
-        accessor,
-        { ...base, resourceFindings: clone },
-        { ...base, resourceFindings: proxied },
-      ]) {
+        Object.assign(Object.create({ resourceFindings: genuineResource }), base),
+        accessor("resourceFindings"),
+        { ...base, resourceFindings: resourceClone },
+        { ...base, resourceFindings: proxiedResource },
+        { ...base, resourceFindings: genuinePlaceholder },
+      ];
+      for (produced of invalidResourceCases) {
+        resourcePredicateMode = "normal";
+        resourcePredicateCalls = 0;
+        placeholderPredicateCalls = 0;
+        mapperCalls.length = 0;
         const report = await isolated.validateAgentSkill(fixture.directory);
         expect(diagnosticCodes(report)).toEqual(["skill.resources.read"]);
         expect(JSON.stringify(report)).not.toContain("private-clone");
+        expect(placeholderPredicateCalls).toBe(0);
+        expect(mapperCalls).toEqual([]);
       }
+
+      produced = {
+        ...base,
+        resourceFindings: genuineResource,
+        placeholderFindings: genuinePlaceholder,
+      };
+      for (resourcePredicateMode of ["throw", "truthy"] as const) {
+        resourcePredicateCalls = 0;
+        placeholderPredicateCalls = 0;
+        mapperCalls.length = 0;
+        expect(diagnosticCodes(await isolated.validateAgentSkill(fixture.directory))).toEqual([
+          "skill.resources.read",
+        ]);
+        expect(resourcePredicateCalls).toBe(1);
+        expect(placeholderPredicateCalls).toBe(0);
+        expect(mapperCalls).toEqual([]);
+      }
+      resourcePredicateMode = "normal";
+
+      const invalidPlaceholderCases = [
+        { ...base, resourceFindings: genuineResource },
+        Object.assign(Object.create({ placeholderFindings: genuinePlaceholder }), base, {
+          resourceFindings: genuineResource,
+        }),
+        accessor("placeholderFindings"),
+        { ...base, resourceFindings: genuineResource, placeholderFindings: placeholderClone },
+        { ...base, resourceFindings: genuineResource, placeholderFindings: proxiedPlaceholder },
+        { ...base, resourceFindings: genuineResource, placeholderFindings: genuineResource },
+      ];
+      for (produced of invalidPlaceholderCases) {
+        resourcePredicateCalls = 0;
+        placeholderPredicateCalls = 0;
+        mapperCalls.length = 0;
+        expect(diagnosticCodes(await isolated.validateAgentSkill(fixture.directory))).toEqual([
+          "skill.resources.read",
+        ]);
+        expect(resourcePredicateCalls).toBe(1);
+        expect(mapperCalls).toEqual([]);
+      }
+      produced = {
+        ...base,
+        resourceFindings: genuineResource,
+        placeholderFindings: genuinePlaceholder,
+      };
+      for (placeholderPredicateMode of ["throw", "truthy"] as const) {
+        resourcePredicateCalls = 0;
+        placeholderPredicateCalls = 0;
+        mapperCalls.length = 0;
+        expect(diagnosticCodes(await isolated.validateAgentSkill(fixture.directory))).toEqual([
+          "skill.resources.read",
+        ]);
+        expect([resourcePredicateCalls, placeholderPredicateCalls]).toEqual([1, 1]);
+        expect(mapperCalls).toEqual([]);
+      }
+      placeholderPredicateMode = "normal";
+      mapperCalls.length = 0;
+      expect(await isolated.validateAgentSkill(fixture.directory)).toMatchObject({ ok: true });
+      expect(mapperCalls).toEqual(["resource", "placeholder"]);
     } finally {
       vi.doUnmock(graphPath);
       vi.doUnmock(mapperPath);
       vi.resetModules();
     }
     expect(getterReads).toBe(0);
-    expect(mapperCalls).toBe(0);
   });
 
   it("rejects invalid runtime API inputs", async () => {
