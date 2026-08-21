@@ -46,13 +46,10 @@ const applySnapshot = Reflect.apply;
 const bufferByteLengthSnapshot = Buffer.byteLength;
 const charCodeAtSnapshot = String.prototype.charCodeAt;
 const freezeSnapshot = Object.freeze;
-const regexpExecSnapshot = RegExp.prototype.exec;
 const weakSetAddSnapshot = WeakSet.prototype.add;
 const weakSetHasSnapshot = WeakSet.prototype.has;
 
 const resultProvenance = new WeakSet<object>();
-const windowsReservedKey =
-  /^(?:aux|clock\$|com(?:[1-9]|[¹²³])|con|conin\$|conout\$|lpt(?:[1-9]|[¹²³])|nul|prn)(?:\.|$)/u;
 
 function registerResult<T extends ResourceNameProfileResult>(result: T): T {
   const frozen = freezeSnapshot(result);
@@ -94,8 +91,43 @@ function byteLength(value: string): number {
   return applySnapshot(bufferByteLengthSnapshot, Buffer, [value, "utf8"]) as number;
 }
 
-function matches(pattern: RegExp, value: string): boolean {
-  return applySnapshot(regexpExecSnapshot, pattern, [value]) !== null;
+function hasPrefix(value: string, prefix: string): boolean {
+  for (let index = 0; index < prefix.length; index += 1) {
+    if (codeUnitAt(value, index) !== codeUnitAt(prefix, index)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isWindowsDeviceNumber(codeUnit: number): boolean {
+  return (
+    (codeUnit >= 0x31 && codeUnit <= 0x39) ||
+    (codeUnit >= 0xb2 && codeUnit <= 0xb3) ||
+    codeUnit === 0xb9
+  );
+}
+
+function hasReservedWindowsKey(key: string): boolean {
+  let end = 0;
+  if (hasPrefix(key, "clock$") || hasPrefix(key, "conin$")) {
+    end = 6;
+  } else if (hasPrefix(key, "conout$")) {
+    end = 7;
+  } else if (
+    hasPrefix(key, "aux") ||
+    hasPrefix(key, "con") ||
+    hasPrefix(key, "nul") ||
+    hasPrefix(key, "prn")
+  ) {
+    end = 3;
+  } else if (
+    (hasPrefix(key, "com") || hasPrefix(key, "lpt")) &&
+    isWindowsDeviceNumber(codeUnitAt(key, 3))
+  ) {
+    end = 4;
+  }
+  return end !== 0 && (end === key.length || codeUnitAt(key, end) === 0x2e);
 }
 
 function safePortableFilenameKey(value: string): PortableFilenameKeyResult | undefined {
@@ -158,7 +190,7 @@ function hasUnsafeWindowsName(exact: string, key: string): boolean {
     }
   }
   const finalCodeUnit = codeUnitAt(exact, exact.length - 1);
-  return finalCodeUnit === 0x20 || finalCodeUnit === 0x2e || matches(windowsReservedKey, key);
+  return finalCodeUnit === 0x20 || finalCodeUnit === 0x2e || hasReservedWindowsKey(key);
 }
 
 function successfulProfile(

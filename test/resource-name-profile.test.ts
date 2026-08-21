@@ -103,6 +103,31 @@ function success(value: string) {
   return result;
 }
 
+function legacyRegExpState(): readonly string[] {
+  const aliases = RegExp as unknown as Readonly<Record<string, string>>;
+  return [
+    RegExp.input,
+    RegExp.$_,
+    RegExp.lastMatch,
+    aliases["$&"],
+    RegExp.lastParen,
+    aliases["$+"],
+    RegExp.leftContext,
+    aliases["$`"],
+    RegExp.rightContext,
+    aliases["$'"],
+    RegExp.$1,
+    RegExp.$2,
+    RegExp.$3,
+    RegExp.$4,
+    RegExp.$5,
+    RegExp.$6,
+    RegExp.$7,
+    RegExp.$8,
+    RegExp.$9,
+  ];
+}
+
 describe("portable observed resource-name profiles", () => {
   it("returns exact, NFC, byte-length, and full-fold projections", () => {
     expect(success("ReadMe.md")).toEqual({
@@ -267,25 +292,32 @@ describe("portable observed resource-name profiles", () => {
     for (const value of ["trailing.", "trailing "]) {
       expect(profileObservedResourceName(value)).toEqual({ ok: false, reason: "nonportable" });
     }
+    for (const stem of ["aux", "clock$", "con", "conin$", "conout$", "nul", "prn"]) {
+      for (const suffix of ["", ".txt"]) {
+        expect(profileObservedResourceName(`${stem}${suffix}`)).toEqual({
+          ok: false,
+          reason: "nonportable",
+        });
+      }
+    }
+    for (const stem of ["com", "lpt"]) {
+      for (const number of ["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"]) {
+        for (const suffix of ["", ".txt"]) {
+          expect(profileObservedResourceName(`${stem}${number}${suffix}`)).toEqual({
+            ok: false,
+            reason: "nonportable",
+          });
+        }
+      }
+    }
     for (const value of [
       "CON",
-      "con.txt",
       "PrN",
       "AUX.log",
-      "NUL",
-      "CLOCK$",
       "CLOC\u212a$.txt",
       "CONIN$",
       "CONOUT$.txt",
       "COM1",
-      "com9.log",
-      "LPT1",
-      "lpt9.log",
-      "COM¹",
-      "COM².txt",
-      "COM³",
-      "LPT¹",
-      "LPT².txt",
       "LPT³",
     ]) {
       expect(profileObservedResourceName(value)).toEqual({ ok: false, reason: "nonportable" });
@@ -293,15 +325,70 @@ describe("portable observed resource-name profiles", () => {
     for (const value of [
       "COM0",
       "COM10",
+      "COM¹0",
       "COM⁴",
       "LPT0",
+      "LPT10",
+      "LPT³x",
       "CONSOLE",
+      "CONIN",
+      "CONIN$x",
+      "CONOUT",
+      "CONOUT$x",
+      "AUXILIARY",
+      "NULl",
+      "PRINTER",
       "xCON",
       "CLOCK",
+      "CLOCK$x",
       "ＣＯＮ",
       "leading space",
     ]) {
       expect(success(value).exact).toBe(value);
+    }
+  });
+
+  it("does not retain reserved names in legacy RegExp state", () => {
+    const secret = "sentinel-private-resource-name";
+    const nonportable = profileObservedResourceName("colon:reserved");
+    const values = [
+      `AUX.${secret}`,
+      `CON.${secret}`,
+      `CLOC\u212a$.${secret}`,
+      `COM¹.${secret}`,
+      `LPT1.${secret}`,
+      `CONIN$.${secret}`,
+      `CONOUT$.${secret}`,
+    ];
+    for (let index = 0; index < values.length; index += 1) {
+      /(b)(e)(n)(i)(g)(n)(-)(o)(k)/u.exec("leftbenign-okright");
+      const legacyBefore = legacyRegExpState();
+      const result = profileObservedResourceName(values[index]);
+      const legacyAfter = legacyRegExpState();
+      expect(legacyAfter).toEqual(legacyBefore);
+      expect(result).toBe(nonportable);
+      expect(Object.isFrozen(result)).toBe(true);
+      expect(JSON.stringify(result)).not.toContain(secret);
+    }
+  });
+
+  it("matches the previous reserved-key language on a deterministic safe corpus", () => {
+    const reference =
+      /^(?:aux|clock\$|com(?:[1-9]|[¹²³])|con|conin\$|conout\$|lpt(?:[1-9]|[¹²³])|nul|prn)(?:\.|$)/u;
+    const compare = (value: string) => {
+      const result = profileObservedResourceName(value);
+      expect(!result.ok && result.reason === "nonportable").toBe(reference.test(value));
+    };
+    for (const stem of ["aux", "clock$", "con", "conin$", "conout$", "nul", "prn"]) {
+      for (const suffix of ["", ".sentinel", "x", "0"]) compare(`${stem}${suffix}`);
+    }
+    for (const stem of ["com", "lpt"]) {
+      for (const number of ["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"]) {
+        for (const suffix of ["", ".sentinel", "x", "0"]) compare(`${stem}${number}${suffix}`);
+      }
+    }
+    for (const value of ["clock", "conin", "conout", "com", "com0", "lpt", "lpt0", "xcon"]) {
+      compare(value);
     }
   });
 
@@ -525,13 +612,15 @@ describe("portable observed resource-name profiles", () => {
       ".normalize(",
       "\\p{",
       ".codePointAt(",
+      "RegExp",
+      ".exec(",
+      ".test(",
     ]) {
       expect(source).not.toContain(fragment);
     }
     expect(source).toContain("isDefaultIgnorableCodePointUnicode15_1(codePoint)");
-    expect(source).toContain("windowsReservedKey, key");
-    expect(source).toContain(")/u;");
-    expect(source).not.toContain(")/iu;");
+    expect(source).toContain("hasReservedWindowsKey(key)");
+    expect(source).toContain("isWindowsDeviceNumber(codeUnitAt(key, 3))");
     expect(source).not.toMatch(/\bfor\s*\([^)]*\bof\b/gu);
   });
 });
