@@ -34,7 +34,6 @@ import type {
   ParsedAgentSkillFrontmatter,
 } from "./types.js";
 
-const PORTABLE_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const MAX_NAME_CODE_POINTS = 64;
 const MAX_DESCRIPTION_CODE_POINTS = 1024;
 const basenameSnapshot = basename;
@@ -46,6 +45,7 @@ const genuinePlaceholderFindingsSnapshot = isGenuineMarkdownResourcePlaceholderF
 const classifyPlaceholderSnapshot = classifySemanticTextPlaceholder;
 const genuineClassificationSnapshot = isGenuineSemanticTextPlaceholderClassification;
 const applySnapshot = Reflect.apply;
+const charCodeAtSnapshot = String.prototype.charCodeAt;
 const isProxySnapshot = types.isProxy;
 const objectGetOwnPropertyDescriptorSnapshot = Object.getOwnPropertyDescriptor;
 const ABSENT = Symbol("absent");
@@ -53,6 +53,21 @@ const INVALID_FIELD = Symbol("invalid");
 
 function applyIntrinsic<T>(intrinsic: (...args: never[]) => unknown, args: unknown[]): T {
   return applySnapshot(intrinsic, undefined, args) as T;
+}
+
+function portableName(value: string): boolean {
+  let needsUnit = true;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = applySnapshot(charCodeAtSnapshot, value, [index]) as number;
+    if ((code >= 97 && code <= 122) || (code >= 48 && code <= 57)) {
+      needsUnit = false;
+    } else if (code === 45 && !needsUnit) {
+      needsUnit = true;
+    } else {
+      return false;
+    }
+  }
+  return !needsUnit;
 }
 
 function isRecord(value: unknown): value is object {
@@ -137,7 +152,7 @@ function validateName(
   if (length < 1 || length > MAX_NAME_CODE_POINTS) {
     error(diagnostics, "skill.name.length", "name must contain 1 to 64 Unicode code points", at);
   }
-  if (!PORTABLE_NAME.test(name)) {
+  if (!portableName(name)) {
     error(
       diagnostics,
       "skill.name.portable_format",
@@ -231,7 +246,7 @@ function readExpectedName(options: AgentSkillValidationOptions | undefined): str
   }
   if (
     value !== undefined &&
-    (typeof value !== "string" || value.length > MAX_NAME_CODE_POINTS || !PORTABLE_NAME.test(value))
+    (typeof value !== "string" || value.length > MAX_NAME_CODE_POINTS || !portableName(value))
   ) {
     throw new TypeError("expectedName must be a portable Agent Skill name when provided.");
   }

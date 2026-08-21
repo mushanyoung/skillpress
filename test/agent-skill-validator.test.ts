@@ -16,6 +16,37 @@ import { diagnosticCodes, expectDiagnosticCodes } from "./helpers/validation.js"
 const fixtures = createSkillFixtures();
 afterEach(() => fixtures.cleanup());
 
+function legacyRegExpState(): readonly string[] {
+  const aliases = RegExp as unknown as Record<string, string>;
+  return [
+    RegExp.input,
+    aliases.$_ as string,
+    RegExp.lastMatch,
+    aliases["$&"] as string,
+    RegExp.lastParen,
+    aliases["$+"] as string,
+    RegExp.leftContext,
+    aliases["$`"] as string,
+    RegExp.rightContext,
+    aliases["$'"] as string,
+    RegExp.$1,
+    RegExp.$2,
+    RegExp.$3,
+    RegExp.$4,
+    RegExp.$5,
+    RegExp.$6,
+    RegExp.$7,
+    RegExp.$8,
+    RegExp.$9,
+  ];
+}
+
+function seedLegacyRegExpState(): void {
+  /^(a)(b)(c)(d)(e)(f)(g)(h)(i)/u.exec("abcdefghi known-benign-tail");
+}
+
+const PORTABLE_NAME_FAILURES = "-a|a-|a--b|A|a_b|é|.|/|a b|a\n|\u00a0|e\u0301|ａ|😀".split("|");
+
 async function resourceGraph(directory: string) {
   const diagnostics = new DiagnosticCollector();
   const root = await inspectAgentSkillRoot(directory, diagnostics);
@@ -183,11 +214,25 @@ describe("Agent Skill metadata validation", () => {
   });
 
   it("requires portable ASCII name syntax", async () => {
-    const fixture = await fixtures.skill(
-      "Bad_Name",
-      skillDocument("name: Bad_Name\ndescription: A description.\nlicense: MIT"),
-    );
-    await expectDiagnosticCodes(fixture.directory, "skill.name.portable_format");
+    const cases = [
+      ["a", false, false],
+      ["0", false, false],
+      ["a0-b9", false, false],
+      ["a".repeat(64), false, false],
+      ["", true, true],
+      ["a".repeat(65), false, true],
+      ...PORTABLE_NAME_FAILURES.map((name) => [name, true, false] as const),
+    ] as const;
+    for (let index = 0; index < cases.length; index += 1) {
+      const [name, portableError, lengthError] = cases[index] as (typeof cases)[number];
+      const fixture = await fixtures.skill(
+        `portable-name-${index}`,
+        skillDocument(`name: ${JSON.stringify(name)}\ndescription: A description.\nlicense: MIT`),
+      );
+      const codes = diagnosticCodes(await validateAgentSkill(fixture.directory));
+      expect(codes.includes("skill.name.portable_format")).toBe(portableError);
+      expect(codes.includes("skill.name.length")).toBe(lengthError);
+    }
   });
 
   it("validates metadata as a safe string-to-string map", async () => {
@@ -870,6 +915,20 @@ describe("Agent Skill metadata validation", () => {
     ]);
   });
 
+  it("keeps all legacy RegExp aliases stable across the awaited missing-root preflight", async () => {
+    const parent = await fixtures.parent();
+    const missing = join(parent, "missing-retention-root");
+    const expectedName = "sentinel-private-name";
+    seedLegacyRegExpState();
+    const before = legacyRegExpState();
+    const report = await validateAgentSkill(missing, { expectedName });
+    const after = legacyRegExpState();
+    expect(before[0]).toBe("abcdefghi known-benign-tail");
+    expect(after).toEqual(before);
+    expect(diagnosticCodes(report)).toEqual(["skill.root.missing"]);
+    expect(JSON.stringify(report)).not.toContain(expectedName);
+  });
+
   it("does not call the legacy document content reader", async () => {
     const fixture = await fixtures.skill(
       "single-read-path",
@@ -1092,18 +1151,56 @@ describe("Agent Skill metadata validation", () => {
     expect(getterReads).toBe(0);
   });
 
+  it("uses captured expected-name intrinsics and contains no module RegExp execution path", async () => {
+    const parent = await fixtures.parent();
+    const missing = join(parent, "missing-captured-name");
+    const targets = [
+      [Reflect, "apply"],
+      [RegExp.prototype, "exec"],
+      [RegExp.prototype, "test"],
+      [String.prototype, "charCodeAt"],
+    ] as const;
+    const descriptors = targets.map(([target, key]) =>
+      Object.getOwnPropertyDescriptor(target, key),
+    );
+    let calls = 0;
+    const poison = () => {
+      calls += 1;
+      throw new Error("live name-scanner intrinsic");
+    };
+    let report: Awaited<ReturnType<typeof validateAgentSkill>> | undefined;
+    try {
+      for (const [target, key] of targets) {
+        Object.defineProperty(target, key, { configurable: true, value: poison, writable: true });
+      }
+      report = await validateAgentSkill(missing, { expectedName: "captured-name" });
+    } finally {
+      for (let index = targets.length - 1; index >= 0; index -= 1) {
+        Object.defineProperty(targets[index][0], targets[index][1], descriptors[index]);
+      }
+    }
+    expect(calls).toBe(0);
+    expect(diagnosticCodes(report as Awaited<ReturnType<typeof validateAgentSkill>>)).toEqual([
+      "skill.root.missing",
+    ]);
+    expect(JSON.stringify(report)).not.toContain("captured-name");
+    const source = (
+      await readFile(new URL("../src/validate/agent-skill.ts", import.meta.url))
+    ).toString();
+    const entries = "RegExp|.exec(|.test(|.match(|.search(|.replace(|.replaceAll(|.split(";
+    for (const fragment of entries.split("|")) {
+      expect(source).not.toContain(fragment);
+    }
+  });
+
   it("rejects invalid runtime API inputs", async () => {
     await expect(validateAgentSkill("" as string)).rejects.toBeInstanceOf(TypeError);
     await expect(validateAgentSkill(7 as unknown as string)).rejects.toBeInstanceOf(TypeError);
-    await expect(
-      validateAgentSkill("unused", null as unknown as { expectedName?: string }),
-    ).rejects.toBeInstanceOf(TypeError);
-    await expect(
-      validateAgentSkill("unused", [] as unknown as { expectedName?: string }),
-    ).rejects.toBeInstanceOf(TypeError);
-    await expect(
-      validateAgentSkill("unused", { expectedName: 7 as unknown as string }),
-    ).rejects.toBeInstanceOf(TypeError);
+    for (const options of [null, [], { expectedName: 7 }]) {
+      await expect(validateAgentSkill("unused", options as never)).rejects.toBeInstanceOf(
+        TypeError,
+      );
+    }
     const hostile = new Proxy(
       {},
       {
@@ -1113,10 +1210,29 @@ describe("Agent Skill metadata validation", () => {
       },
     );
     await expect(validateAgentSkill("unused", hostile)).rejects.toBeInstanceOf(TypeError);
-    for (const expectedName of ["", "Bad_Name", "a".repeat(65)]) {
-      await expect(validateAgentSkill("unused", { expectedName })).rejects.toBeInstanceOf(
-        TypeError,
-      );
+    const rootPath = "../src/validate/skill-root.js";
+    let rootCalls = 0;
+    vi.resetModules();
+    vi.doMock(rootPath, async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/validate/skill-root.js")>()),
+      inspectAgentSkillRoot: async () => {
+        rootCalls += 1;
+        return undefined;
+      },
+    }));
+    try {
+      const isolated = await import("../src/validate/agent-skill.js");
+      for (const expectedName of ["", ...PORTABLE_NAME_FAILURES, "\ud800", "\0", "a".repeat(65)]) {
+        await expect(
+          isolated.validateAgentSkill("unused", { expectedName }),
+        ).rejects.toBeInstanceOf(TypeError);
+      }
+      expect(rootCalls).toBe(0);
+      await isolated.validateAgentSkill("unused", { expectedName: "a".repeat(64) });
+      expect(rootCalls).toBe(1);
+    } finally {
+      vi.doUnmock(rootPath);
+      vi.resetModules();
     }
   });
 
