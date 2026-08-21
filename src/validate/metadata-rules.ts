@@ -9,6 +9,58 @@ import type {
 const MAX_COMPATIBILITY_CODE_POINTS = 500;
 const MAX_RECOMMENDED_BODY_LINES = 500;
 
+// Module initialization is the trust boundary for the intrinsics below.
+const applySnapshot = Reflect.apply;
+const charCodeAtSnapshot = String.prototype.charCodeAt;
+
+function codeUnitAt(value: string, index: number): number {
+  return applySnapshot(charCodeAtSnapshot, value, [index]) as number;
+}
+
+function isEcmaScriptWhitespace(codeUnit: number): boolean {
+  return (
+    (codeUnit >= 0x09 && codeUnit <= 0x0d) ||
+    codeUnit === 0x20 ||
+    codeUnit === 0xa0 ||
+    codeUnit === 0x1680 ||
+    (codeUnit >= 0x2000 && codeUnit <= 0x200a) ||
+    codeUnit === 0x2028 ||
+    codeUnit === 0x2029 ||
+    codeUnit === 0x202f ||
+    codeUnit === 0x205f ||
+    codeUnit === 0x3000 ||
+    codeUnit === 0xfeff
+  );
+}
+
+function isAllowedToolsValue(value: string): boolean {
+  if (value.length === 0) return false;
+  let previousWasSeparator = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = codeUnitAt(value, index);
+    if (codeUnit === 0x20) {
+      if (index === 0 || index === value.length - 1 || previousWasSeparator) return false;
+      previousWasSeparator = true;
+    } else {
+      if (isEcmaScriptWhitespace(codeUnit)) return false;
+      previousWasSeparator = false;
+    }
+  }
+  return true;
+}
+
+function bodyExceedsRecommendedLines(body: string): boolean {
+  let lines = 1;
+  for (let index = 0; index < body.length; index += 1) {
+    const codeUnit = codeUnitAt(body, index);
+    if (codeUnit !== 0x0a && codeUnit !== 0x0d) continue;
+    if (codeUnit === 0x0d && codeUnitAt(body, index + 1) === 0x0a) index += 1;
+    lines += 1;
+    if (lines > MAX_RECOMMENDED_BODY_LINES) return true;
+  }
+  return false;
+}
+
 function error(
   diagnostics: DiagnosticCollector,
   code: string,
@@ -76,7 +128,7 @@ function validateOptionalStrings(
   if (allowedTools !== undefined) {
     result.allowedTools = allowedTools;
     const at = parsed.fields.get("allowed-tools")?.location;
-    if (!/^\S+(?: \S+)*$/u.test(allowedTools)) {
+    if (!isAllowedToolsValue(allowedTools)) {
       error(
         diagnostics,
         "skill.allowed_tools.format",
@@ -142,7 +194,7 @@ function validateBody(body: string, diagnostics: DiagnosticCollector): void {
       "agent-skills",
       "skill instructions should contain a non-empty Markdown body",
     );
-  } else if (body.split(/\r\n|\n|\r/u).length > MAX_RECOMMENDED_BODY_LINES) {
+  } else if (bodyExceedsRecommendedLines(body)) {
     diagnostics.add(
       "skill.body.recommended_length",
       "warning",
