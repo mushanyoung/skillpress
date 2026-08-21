@@ -6,13 +6,6 @@ export const MAX_SKILL_REFERENCE_COMPONENT_BYTES = 255;
 export const MAX_SKILL_REFERENCE_DESTINATION_BYTES = 4 * 1024;
 export const MAX_SKILL_REFERENCE_PATH_COMPONENTS = 64;
 
-const URI_SCHEME = /^([A-Za-z][A-Za-z0-9+.-]*):/u;
-const WINDOWS_DRIVE = /^[A-Za-z]:/u;
-const WINDOWS_DEVICE_PATH = /^\/\/[?.](?:\/|$)/u;
-const ENCODED_SEPARATOR = /%(?:2f|5c)/iu;
-const ENCODED_DELIMITER = /%(?:23|3a|3f)/iu;
-const WINDOWS_DEVICE_SCHEME = /^(?:aux|com[1-9]|con|lpt[1-9]|nul|prn)$/u;
-const WHITESPACE = /\s/u;
 const DANGEROUS_SCHEMES = new Set(["data", "file", "javascript", "vbscript"]);
 
 export type MarkdownDestinationIssue =
@@ -51,6 +44,7 @@ const applySnapshot = Reflect.apply;
 const objectRef = Object;
 const bufferByteLengthSnapshot = Buffer.byteLength;
 const bufferConstructorSnapshot = Buffer;
+const charCodeAtSnapshot = String.prototype.charCodeAt;
 const decodeURIComponentSnapshot = decodeURIComponent;
 const definePropertySnapshot = Object.defineProperty;
 const freezeSnapshot = Object.freeze;
@@ -59,7 +53,6 @@ const indexOfSnapshot = String.prototype.indexOf;
 const isSafePathInputSnapshot = isSafePathInput;
 const isUnambiguousUnicodeSnapshot = isUnambiguousUnicode;
 const normalizeSnapshot = String.prototype.normalize;
-const regexpExecSnapshot = RegExp.prototype.exec;
 const setHasSnapshot = Set.prototype.has;
 const sliceSnapshot = String.prototype.slice;
 const startsWithSnapshot = String.prototype.startsWith;
@@ -68,10 +61,6 @@ const toLowerCaseSnapshot = String.prototype.toLowerCase;
 type Intrinsic = (...args: never[]) => unknown;
 function applyIntrinsic<T>(intrinsic: Intrinsic, receiver: unknown, args: unknown[]): T {
   return applySnapshot(intrinsic, receiver, args) as T;
-}
-
-function matches(pattern: RegExp, value: string): RegExpExecArray | null {
-  return applyIntrinsic<RegExpExecArray | null>(regexpExecSnapshot, pattern, [value]);
 }
 
 function includes(value: string, search: string): boolean {
@@ -95,6 +84,106 @@ function safePath(value: string): boolean {
 
 function unambiguous(value: string): boolean {
   return applyIntrinsic<boolean>(isUnambiguousUnicodeSnapshot, undefined, [value]);
+}
+
+function codeUnitAt(value: string, index: number): number {
+  return applyIntrinsic<number>(charCodeAtSnapshot, value, [index]);
+}
+
+function isAsciiLetter(code: number): boolean {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function uriSchemeEnd(value: string): number {
+  if (!isAsciiLetter(codeUnitAt(value, 0))) return -1;
+  for (let index = 1; index < value.length; index += 1) {
+    const code = codeUnitAt(value, index);
+    if (code === 58) return index;
+    if (
+      !isAsciiLetter(code) &&
+      !(code >= 48 && code <= 57) &&
+      code !== 43 &&
+      code !== 45 &&
+      code !== 46
+    ) {
+      return -1;
+    }
+  }
+  return -1;
+}
+
+function hasWindowsDrive(value: string): boolean {
+  return isAsciiLetter(codeUnitAt(value, 0)) && codeUnitAt(value, 1) === 58;
+}
+
+function hasWindowsDevicePath(value: string): boolean {
+  if (value.length < 3 || codeUnitAt(value, 0) !== 47 || codeUnitAt(value, 1) !== 47) {
+    return false;
+  }
+  const marker = codeUnitAt(value, 2);
+  return (marker === 46 || marker === 63) && (value.length === 3 || codeUnitAt(value, 3) === 47);
+}
+
+function encodedSyntax(value: string): 0 | 1 | 2 {
+  let delimiter = false;
+  for (let index = 0; index + 2 < value.length; index += 1) {
+    if (codeUnitAt(value, index) !== 37) continue;
+    const middle = codeUnitAt(value, index + 1);
+    const last = codeUnitAt(value, index + 2);
+    if (
+      (middle === 50 && (last === 70 || last === 102)) ||
+      (middle === 53 && (last === 67 || last === 99))
+    ) {
+      return 1;
+    }
+    if (
+      (middle === 50 && last === 51) ||
+      (middle === 51 && (last === 65 || last === 70 || last === 97 || last === 102))
+    ) {
+      delimiter = true;
+    }
+  }
+  return delimiter ? 2 : 0;
+}
+
+function isWindowsDeviceScheme(value: string): boolean {
+  if (value === "aux" || value === "con" || value === "nul" || value === "prn") {
+    return true;
+  }
+  if (value.length !== 4) return false;
+  const first = codeUnitAt(value, 0);
+  const second = codeUnitAt(value, 1);
+  const third = codeUnitAt(value, 2);
+  const digit = codeUnitAt(value, 3);
+  return (
+    ((first === 99 && second === 111 && third === 109) ||
+      (first === 108 && second === 112 && third === 116)) &&
+    digit >= 49 &&
+    digit <= 57
+  );
+}
+
+function isEsWhitespace(code: number): boolean {
+  return (
+    (code >= 9 && code <= 13) ||
+    code === 32 ||
+    code === 160 ||
+    code === 5760 ||
+    (code >= 8192 && code <= 8202) ||
+    code === 8232 ||
+    code === 8233 ||
+    code === 8239 ||
+    code === 8287 ||
+    code === 12_288 ||
+    code === 65_279
+  );
+}
+
+function hasEsWhitespace(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    if (isEsWhitespace(codeUnitAt(value, index))) return true;
+  }
+  return false;
 }
 
 function append<T>(values: T[], value: T): void {
@@ -136,29 +225,30 @@ function externalScheme(raw: string, scheme: string): MarkdownDestination {
   const normalized = applyIntrinsic<string>(toLowerCaseSnapshot, scheme, []);
   if (
     applyIntrinsic<boolean>(setHasSnapshot, DANGEROUS_SCHEMES, [normalized]) ||
-    matches(WINDOWS_DEVICE_SCHEME, normalized) !== null
+    isWindowsDeviceScheme(normalized)
   ) {
     return invalid("unsafe_scheme");
   }
   if (includes(raw, "\\")) return invalid("backslash");
-  if (matches(WHITESPACE, raw) !== null) return invalid("invalid_external");
+  if (hasEsWhitespace(raw)) return invalid("invalid_external");
   return EXTERNAL;
 }
 
 function protocolRelative(raw: string): MarkdownDestination {
   if (includes(raw, "\\")) return invalid("backslash");
-  if (startsWith(raw, "///") || matches(WINDOWS_DEVICE_PATH, raw) !== null) {
+  if (startsWith(raw, "///") || hasWindowsDevicePath(raw)) {
     return invalid("absolute_path");
   }
-  if (matches(WHITESPACE, raw) !== null) return invalid("invalid_external");
+  if (hasEsWhitespace(raw)) return invalid("invalid_external");
   const first = applyIntrinsic<string>(sliceSnapshot, raw, [2, 3]);
   return includes("/?#", first) ? invalid("invalid_external") : EXTERNAL;
 }
 
 function decodedLocalPath(rawPath: string): MarkdownDestination {
   if (startsWith(rawPath, "/")) return invalid("absolute_path");
-  if (matches(ENCODED_SEPARATOR, rawPath) !== null) return invalid("encoded_separator");
-  if (matches(ENCODED_DELIMITER, rawPath) !== null) return invalid("encoded_delimiter");
+  const syntax = encodedSyntax(rawPath);
+  if (syntax === 1) return invalid("encoded_separator");
+  if (syntax === 2) return invalid("encoded_delimiter");
 
   let decoded: string;
   try {
@@ -211,12 +301,14 @@ export function classifyMarkdownDestination(raw: unknown): MarkdownDestination {
   }
   if (raw.length === 0) return DOCUMENT;
   if (!unambiguous(raw)) return invalid("unsafe_unicode");
-  if (matches(WINDOWS_DRIVE, raw) !== null) return invalid("windows_drive");
+  if (hasWindowsDrive(raw)) return invalid("windows_drive");
   if (startsWith(raw, "#") || startsWith(raw, "?")) return DOCUMENT;
   if (startsWith(raw, "//")) return protocolRelative(raw);
 
-  const scheme = matches(URI_SCHEME, raw);
-  if (scheme !== null) return externalScheme(raw, scheme[1] as string);
+  const schemeEnd = uriSchemeEnd(raw);
+  if (schemeEnd !== -1) {
+    return externalScheme(raw, applyIntrinsic<string>(sliceSnapshot, raw, [0, schemeEnd]));
+  }
 
   const fragment = applyIntrinsic<number>(indexOfSnapshot, raw, ["#"]);
   const rawPath = fragment === -1 ? raw : applyIntrinsic<string>(sliceSnapshot, raw, [0, fragment]);

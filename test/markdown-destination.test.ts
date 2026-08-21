@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { readFileSync } from "node:fs";
 import { posix, win32 } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -13,13 +14,43 @@ import {
 import { analyzeMarkdown } from "../src/validate/markdown-analysis.js";
 
 function local(path: string) {
-  const components = path.split("/");
-  return {
-    kind: "local",
-    path,
-    components,
-  };
+  return { kind: "local", path, components: path.split("/") };
 }
+
+function legacyRegExpState(): readonly string[] {
+  const aliases = RegExp as unknown as Record<string, string>;
+  return [
+    RegExp.input,
+    aliases.$_ as string,
+    RegExp.lastMatch,
+    aliases["$&"] as string,
+    RegExp.lastParen,
+    aliases["$+"] as string,
+    RegExp.leftContext,
+    aliases["$`"] as string,
+    RegExp.rightContext,
+    aliases["$'"] as string,
+    RegExp.$1,
+    RegExp.$2,
+    RegExp.$3,
+    RegExp.$4,
+    RegExp.$5,
+    RegExp.$6,
+    RegExp.$7,
+    RegExp.$8,
+    RegExp.$9,
+  ];
+}
+
+function seedLegacyRegExpState(): void {
+  /^(a)(b)(c)(d)(e)(f)(g)(h)(i)/u.exec("abcdefghi known-benign-tail");
+}
+
+const ES_WHITESPACE_CODE_UNITS = [
+  0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x0020, 0x00a0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003,
+  0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+  0xfeff,
+];
 
 describe("Markdown destination classification", () => {
   it("recognizes document-local and external destinations without fetching them", () => {
@@ -144,6 +175,162 @@ describe("Markdown destination classification", () => {
         reason: "unsafe_scheme",
       });
     }
+  });
+
+  it("matches the seven frozen regular languages over deterministic edge corpora", () => {
+    const uriScheme = /^([A-Za-z][A-Za-z0-9+.-]*):/u;
+    const windowsDrive = /^[A-Za-z]:/u;
+    const windowsDevicePath = /^\/\/[?.](?:\/|$)/u;
+    const encodedSeparator = /%(?:2f|5c)/iu;
+    const encodedDelimiter = /%(?:23|3a|3f)/iu;
+    const windowsDeviceScheme = /^(?:aux|com[1-9]|con|lpt[1-9]|nul|prn)$/u;
+    const whitespace = /\s/u;
+
+    for (const value of [
+      "za:payload",
+      "ZA0+.-:payload",
+      "za::payload",
+      "0za:payload",
+      "+za:payload",
+      ".za:payload",
+      "_za:payload",
+      "za_:payload",
+      "za/payload",
+      "za",
+    ]) {
+      expect(classifyMarkdownDestination(value).kind === "external").toBe(uriScheme.test(value));
+    }
+
+    for (const prefix of [
+      ..."ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+      "0",
+      "+",
+      "é",
+      "K",
+      "ſ",
+      "ab",
+    ]) {
+      const value = `${prefix}:payload`;
+      const result = classifyMarkdownDestination(value);
+      expect(result.kind === "invalid" && result.reason === "windows_drive").toBe(
+        windowsDrive.test(value),
+      );
+    }
+
+    for (const value of ["//?", "//.", "//?/tail", "//./tail", "//?x", "//.x", "//x/tail"]) {
+      const result = classifyMarkdownDestination(value);
+      expect(result.kind === "invalid" && result.reason === "absolute_path").toBe(
+        windowsDevicePath.test(value),
+      );
+    }
+
+    for (const value of [
+      "plain",
+      "a%2fb",
+      "a%2Fb",
+      "a%5cb",
+      "a%5Cb",
+      "a%23b",
+      "a%3ab",
+      "a%3Ab",
+      "a%3fb",
+      "a%3Fb",
+      "a%20b",
+      "a%2gb",
+    ]) {
+      const result = classifyMarkdownDestination(value);
+      expect(result.kind === "invalid" && result.reason === "encoded_separator").toBe(
+        encodedSeparator.test(value),
+      );
+      if (!encodedSeparator.test(value)) {
+        expect(result.kind === "invalid" && result.reason === "encoded_delimiter").toBe(
+          encodedDelimiter.test(value),
+        );
+      }
+    }
+
+    for (const scheme of [
+      "aux",
+      "CON",
+      "nul",
+      "PrN",
+      "com1",
+      "COM9",
+      "lpt1",
+      "LPT9",
+      "com0",
+      "com10",
+      "lpt0",
+      "lpt10",
+      "console",
+      "clock",
+    ]) {
+      const result = classifyMarkdownDestination(`${scheme}:payload`);
+      expect(result.kind === "invalid" && result.reason === "unsafe_scheme").toBe(
+        windowsDeviceScheme.test(scheme.toLowerCase()),
+      );
+    }
+
+    const whitespaceMatches: number[] = [];
+    for (let code = 0; code <= 0xffff; code += 1) {
+      if (whitespace.test(String.fromCharCode(code))) whitespaceMatches.push(code);
+    }
+    expect(whitespaceMatches).toEqual(ES_WHITESPACE_CODE_UNITS);
+  });
+
+  it("preserves ES2025 whitespace and surrounding rejection priorities", () => {
+    const unsafe = new Set([0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x2028, 0x2029, 0xfeff]);
+    for (const code of ES_WHITESPACE_CODE_UNITS) {
+      const character = String.fromCharCode(code);
+      const reason = unsafe.has(code) ? "unsafe_unicode" : "invalid_external";
+      expect(classifyMarkdownDestination(`custom:a${character}b`)).toEqual({
+        kind: "invalid",
+        reason,
+      });
+      expect(classifyMarkdownDestination(`//host${character}path`)).toEqual({
+        kind: "invalid",
+        reason,
+      });
+    }
+    expect(classifyMarkdownDestination("custom:a\u0378b")).toEqual({ kind: "external" });
+    expect(classifyMarkdownDestination("custom:a\u0085b")).toEqual({
+      kind: "invalid",
+      reason: "unsafe_unicode",
+    });
+    expect(classifyMarkdownDestination("javascript:bad\\ path")).toEqual({
+      kind: "invalid",
+      reason: "unsafe_scheme",
+    });
+    expect(classifyMarkdownDestination("custom:bad path\\tail")).toEqual({
+      kind: "invalid",
+      reason: "backslash",
+    });
+    expect(classifyMarkdownDestination("//?/bad path")).toEqual({
+      kind: "invalid",
+      reason: "absolute_path",
+    });
+    expect(classifyMarkdownDestination("//?/bad\\ path")).toEqual({
+      kind: "invalid",
+      reason: "backslash",
+    });
+  });
+
+  it("keeps encoded separators globally ahead of delimiters and malformed escapes", () => {
+    for (const value of ["a%23b%2fc", "a%3ab%5Cc", "a%3Fb%2Fc", "a%ZZb%2fc", "a%2fb%23c"]) {
+      expect(classifyMarkdownDestination(value)).toEqual({
+        kind: "invalid",
+        reason: "encoded_separator",
+      });
+    }
+    expect(classifyMarkdownDestination("safe.md#fragment%2fignored")).toEqual(local("safe.md"));
+    expect(classifyMarkdownDestination("/absolute%2fpath")).toEqual({
+      kind: "invalid",
+      reason: "absolute_path",
+    });
+    expect(classifyMarkdownDestination("/absolute?query=%2f")).toEqual({
+      kind: "invalid",
+      reason: "query",
+    });
   });
 
   it("rejects absolute, query-bearing, backslash, drive, and structural aliases", () => {
@@ -376,6 +563,73 @@ describe("Markdown destination classification", () => {
     ).toEqual({ kind: "invalid", reason: "too_large" });
   });
 
+  it("does not mutate any legacy RegExp alias on safe or unsafe old execution paths", () => {
+    const cases = [
+      ["custom:retention-sentinel", "external"],
+      ["javascript:retention-sentinel", "invalid:unsafe_scheme"],
+      ["COM1:retention-sentinel", "invalid:unsafe_scheme"],
+      ["custom:bad path", "invalid:invalid_external"],
+      ["custom:bad\\path", "invalid:backslash"],
+      ["//host.invalid/path", "external"],
+      ["//host.invalid/bad path", "invalid:invalid_external"],
+      ["//host.invalid\\bad", "invalid:backslash"],
+      ["//?/C:/retention-sentinel", "invalid:absolute_path"],
+      ["C:retention-sentinel", "invalid:windows_drive"],
+      ["local/retention-sentinel", "local"],
+      ["local%2fretention-sentinel", "invalid:encoded_separator"],
+      ["local%23retention-sentinel", "invalid:encoded_delimiter"],
+      ["#retention-sentinel", "document"],
+      ["?retention-sentinel", "document"],
+    ] as const;
+    const seeded = [
+      "abcdefghi known-benign-tail",
+      "abcdefghi known-benign-tail",
+      "abcdefghi",
+      "abcdefghi",
+      "i",
+      "i",
+      "",
+      "",
+      " known-benign-tail",
+      " known-benign-tail",
+      ..."abcdefghi",
+    ];
+
+    for (const [value, expected] of cases) {
+      seedLegacyRegExpState();
+      const before = legacyRegExpState();
+      const result = classifyMarkdownDestination(value);
+      const after = legacyRegExpState();
+      expect(before).toEqual(seeded);
+      expect(after).toEqual(before);
+      expect(result.kind === "invalid" ? `${result.kind}:${result.reason}` : result.kind).toBe(
+        expected,
+      );
+      if (result.kind !== "local") {
+        expect(JSON.stringify(result)).not.toContain("retention-sentinel");
+      }
+    }
+  });
+
+  it("contains no per-input RegExp execution entry point", () => {
+    const source = readFileSync(
+      new URL("../src/validate/markdown-destination.ts", import.meta.url),
+      "utf8",
+    );
+    for (const fragment of [
+      "RegExp",
+      ".exec(",
+      ".test(",
+      ".match(",
+      ".search(",
+      ".replace(",
+      ".replaceAll(",
+      ".split(",
+    ]) {
+      expect(source).not.toContain(fragment);
+    }
+  });
+
   it("uses captured classifier and transitive path-safety intrinsics", () => {
     const defineProperty = Object.defineProperty;
     const targets = [
@@ -387,9 +641,11 @@ describe("Markdown destination classification", () => {
       [Object, "defineProperty"],
       [Object, "freeze"],
       [RegExp.prototype, "exec"],
+      [RegExp.prototype, "test"],
       [RegExp.prototype, Symbol.search],
       [RegExp.prototype, Symbol.split],
       [Set.prototype, "has"],
+      [String.prototype, "charCodeAt"],
       [String.prototype, "codePointAt"],
       [String.prototype, "endsWith"],
       [String.prototype, "includes"],
