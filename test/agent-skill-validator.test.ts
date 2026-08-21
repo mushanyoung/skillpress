@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { types } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -176,6 +177,8 @@ describe("Agent Skill metadata validation", () => {
       "skill.name.portable_format",
       "skill.description.required",
       "skill.compatibility.length",
+      "skill.frontmatter.placeholder",
+      "skill.frontmatter.placeholder",
     );
   });
 
@@ -474,7 +477,7 @@ describe("Agent Skill metadata validation", () => {
     const fixture = await fixtures.skill(
       "visible-placeholders",
       skillDocument(
-        "name: visible-placeholders\ndescription: TODO\nlicense: MIT\ncompatibility: TODO",
+        "name: visible-placeholders\r\ndescription: 'TODO'\r\nlicense: MIT\r\ncompatibility: |-\r\n  TODO",
         "# TODO\n\n[guide](references/guide.md)\n",
       ),
     );
@@ -483,12 +486,30 @@ describe("Agent Skill metadata validation", () => {
     const report = await validateAgentSkill(fixture.directory);
     expect(report.diagnostics).toEqual([
       {
+        code: "skill.frontmatter.placeholder",
+        severity: "error",
+        scope: "skillpress",
+        file: "SKILL.md",
+        message: "frontmatter semantic text must not contain placeholders",
+        line: 3,
+        column: 1,
+      },
+      {
+        code: "skill.frontmatter.placeholder",
+        severity: "error",
+        scope: "skillpress",
+        file: "SKILL.md",
+        message: "frontmatter semantic text must not contain placeholders",
+        line: 5,
+        column: 1,
+      },
+      {
         code: "skill.markdown.placeholder",
         severity: "error",
         scope: "skillpress",
         file: "SKILL.md",
         message: "Markdown visible text must not contain placeholders",
-        line: 7,
+        line: 8,
         column: 1,
       },
       {
@@ -502,6 +523,212 @@ describe("Agent Skill metadata validation", () => {
       },
     ]);
     expect(JSON.stringify(report)).not.toContain("insert here");
+  });
+
+  it("classifies only decoded frontmatter semantic fields through captured branded results", async () => {
+    const semanticPath = "../src/validate/semantic-text-placeholder.js";
+    const graphPath = "../src/validate/markdown-resource-graph.js";
+    const fixture = await fixtures.skill(
+      "todo",
+      skillDocument(
+        [
+          "# TODO raw syntax",
+          "name: todo",
+          'description: "T\\u004fDO"',
+          "license: TODO",
+          "compatibility: >-",
+          "  [insert here]",
+          "allowed-tools: TODO",
+          "metadata:",
+          "  TODO: TODO",
+        ].join("\n"),
+        "# TODO\n\n[missing](missing.md)\n",
+      ),
+    );
+    const graphDiagnostics = new DiagnosticCollector();
+    const root = await inspectAgentSkillRoot(fixture.directory, graphDiagnostics);
+    const document = root && (await inspectAgentSkillDocument(root, graphDiagnostics));
+    if (document === undefined) throw new Error("expected an inspected document");
+    const graphed = await buildInspectedMarkdownResourceGraph(document);
+    if (!graphed.ok) throw new Error("expected a Markdown resource graph");
+    let produced = graphed;
+    const foreignSemantic = await import(semanticPath);
+    const foreignSafe = foreignSemantic.classifySemanticTextPlaceholder("ordinary");
+    let producer: (value: unknown) => unknown;
+    let predicate: (value: unknown) => unknown;
+    let actualSemantic: typeof foreignSemantic | undefined;
+    const seen: string[] = [];
+    const classify = (value: unknown) => {
+      if (typeof value === "string") seen.push(value);
+      return producer(value);
+    };
+    const genuine = (value: unknown) => predicate(value);
+    const mockedSemantic = {
+      ...foreignSemantic,
+      classifySemanticTextPlaceholder: classify,
+      isGenuineSemanticTextPlaceholderClassification: genuine,
+    };
+    vi.resetModules();
+    vi.doMock(semanticPath, async (importOriginal) => {
+      actualSemantic = await importOriginal<typeof foreignSemantic>();
+      producer = actualSemantic.classifySemanticTextPlaceholder;
+      predicate = actualSemantic.isGenuineSemanticTextPlaceholderClassification;
+      return mockedSemantic;
+    });
+    vi.doMock(graphPath, async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/validate/markdown-resource-graph.js")>()),
+      buildInspectedMarkdownResourceGraph: async () => produced,
+      isGenuineBundledResourceNameFindings: (value: unknown) => value === graphed.resourceFindings,
+      isGenuineMarkdownResourcePlaceholderFindings: (value: unknown) =>
+        value === graphed.placeholderFindings,
+    }));
+    try {
+      const isolated = await import("../src/validate/agent-skill.js");
+      const semantic = actualSemantic;
+      if (semantic === undefined) throw new Error("expected the isolated semantic module");
+      const placeholder = semantic.classifySemanticTextPlaceholder("TODO");
+      const safe = semantic.classifySemanticTextPlaceholder("ordinary");
+      const invalid = semantic.classifySemanticTextPlaceholder(Symbol("private"));
+      const tooLarge = semantic.classifySemanticTextPlaceholder("x".repeat(512 * 1024 + 1));
+      const reflectApply = Reflect.apply;
+      const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+      const isProxy = types.isProxy;
+      const mapGet = Map.prototype.get;
+      const arrayIterator = Array.prototype[Symbol.iterator];
+      let iteratorCalls = 0;
+      const countedArrayIterator = function (this: unknown[]) {
+        iteratorCalls += 1;
+        return reflectApply(arrayIterator, this, []);
+      } as typeof arrayIterator;
+      const liveFailure = () => {
+        throw new Error("sentinel-private live intrinsic");
+      };
+      const restore = () => {
+        Reflect.apply = reflectApply;
+        Object.getOwnPropertyDescriptor = getOwnPropertyDescriptor;
+        types.isProxy = isProxy;
+        Map.prototype.get = mapGet;
+        Array.prototype[Symbol.iterator] = arrayIterator;
+        mockedSemantic.classifySemanticTextPlaceholder = classify;
+        mockedSemantic.isGenuineSemanticTextPlaceholderClassification = genuine;
+      };
+      producer = () => {
+        if (seen.length === 1) {
+          Reflect.apply = liveFailure;
+          Object.getOwnPropertyDescriptor = liveFailure;
+          types.isProxy = liveFailure;
+          Map.prototype.get = liveFailure;
+          Array.prototype[Symbol.iterator] = countedArrayIterator;
+          mockedSemantic.classifySemanticTextPlaceholder = liveFailure;
+          mockedSemantic.isGenuineSemanticTextPlaceholderClassification = () => false;
+        }
+        return placeholder;
+      };
+      predicate = semantic.isGenuineSemanticTextPlaceholderClassification;
+      let captured: Awaited<ReturnType<typeof isolated.validateAgentSkill>> | undefined;
+      try {
+        captured = await isolated.validateAgentSkill(fixture.directory);
+      } finally {
+        restore();
+      }
+      expect(seen).toEqual(["TODO", "[insert here]"]);
+      expect(iteratorCalls).toBe(1);
+      expect(
+        captured?.diagnostics.filter((entry) => entry.code === "skill.frontmatter.placeholder"),
+      ).toHaveLength(2);
+      for (const documentText of [
+        skillDocument("name: todo\nlicense: MIT"),
+        skillDocument("name: todo\ndescription: [TODO]\ncompatibility: false\nlicense: MIT"),
+        "---\nname: [unterminated\n---\n",
+      ]) {
+        produced = { ...graphed, documentText };
+        seen.length = 0;
+        await isolated.validateAgentSkill(fixture.directory);
+        expect(seen).toEqual([]);
+      }
+      produced = graphed;
+
+      seen.length = 0;
+      producer = () => {
+        if (seen.length === 2) throw new Error("sentinel-private late producer");
+        return placeholder;
+      };
+      const late = await isolated.validateAgentSkill(fixture.directory);
+      expect(
+        late.diagnostics.filter((entry) => entry.code.startsWith("skill.frontmatter.placeholder")),
+      ).toEqual([
+        expect.objectContaining({
+          code: "skill.frontmatter.placeholder_analysis",
+          line: 6,
+          column: 1,
+        }),
+      ]);
+      expect(diagnosticCodes(late)).toEqual(
+        expect.arrayContaining(["skill.markdown.placeholder", "skill.reference.missing"]),
+      );
+
+      let traps = 0;
+      const trap = () => {
+        traps += 1;
+        throw new Error("sentinel-private proxy trap");
+      };
+      const handler: ProxyHandler<object> = {
+        get: trap,
+        getOwnPropertyDescriptor: trap,
+      };
+      const activeProxy = new Proxy(safe, handler);
+      const revoked = Proxy.revocable(safe, handler);
+      revoked.revoke();
+      let accessorReads = 0;
+      const accessor = Object.defineProperties(
+        {},
+        {
+          ok: { get: () => (accessorReads += 1) },
+          reason: { get: () => (accessorReads += 1) },
+        },
+      );
+      const failures: readonly (readonly [() => unknown, () => unknown])[] = [
+        [() => foreignSafe, semantic.isGenuineSemanticTextPlaceholderClassification],
+        [() => structuredClone(safe), semantic.isGenuineSemanticTextPlaceholderClassification],
+        [() => activeProxy, () => true],
+        [() => revoked.proxy, () => true],
+        [() => accessor, () => true],
+        [() => invalid, semantic.isGenuineSemanticTextPlaceholderClassification],
+        [() => tooLarge, semantic.isGenuineSemanticTextPlaceholderClassification],
+        [() => ({ ok: true, reason: "placeholder" }), () => true],
+        [() => safe, () => ({ truthy: true })],
+        [
+          () => safe,
+          () => {
+            throw new Error("sentinel-private predicate");
+          },
+        ],
+      ];
+      for (const failure of failures) {
+        seen.length = 0;
+        producer = failure[0];
+        predicate = failure[1];
+        const report = await isolated.validateAgentSkill(fixture.directory);
+        expect(seen).toEqual(["TODO"]);
+        expect(
+          report.diagnostics.filter((entry) =>
+            entry.code.startsWith("skill.frontmatter.placeholder"),
+          ),
+        ).toEqual([
+          expect.objectContaining({ code: "skill.frontmatter.placeholder_analysis", line: 4 }),
+        ]);
+        expect(diagnosticCodes(report)).toEqual(
+          expect.arrayContaining(["skill.markdown.placeholder", "skill.reference.missing"]),
+        );
+        expect(JSON.stringify(report)).not.toContain("sentinel-private");
+      }
+      expect(traps).toBe(0);
+      expect(accessorReads).toBe(0);
+    } finally {
+      vi.doUnmock(semanticPath);
+      vi.doUnmock(graphPath);
+      vi.resetModules();
+    }
   });
 
   it("treats complete missing-target observations as validation errors", async () => {
@@ -591,7 +818,7 @@ describe("Agent Skill metadata validation", () => {
   });
 
   it("admits root diagnostics before bounded graph findings", async () => {
-    const placeholders = Array.from({ length: MAX_SKILL_DIAGNOSTICS - 3 }, () => "# TODO").join(
+    const placeholders = Array.from({ length: MAX_SKILL_DIAGNOSTICS - 4 }, () => "# TODO").join(
       "\n",
     );
     const links = Array.from(
@@ -600,17 +827,20 @@ describe("Agent Skill metadata validation", () => {
     ).join("\n");
     const fixture = await fixtures.skill(
       "diagnostic-priority",
-      skillDocument("license: MIT", `${placeholders}\n\n${links}\n`),
+      skillDocument(
+        "description: TODO\ncompatibility: TODO\nlicense: MIT",
+        `${placeholders}\n\n${links}\n`,
+      ),
     );
     await writeFile(join(fixture.directory, ".env"), "private value");
     const report = await validateAgentSkill(fixture.directory);
     const codes = diagnosticCodes(report);
     expect(report.diagnostics).toHaveLength(MAX_SKILL_DIAGNOSTICS);
     expect(codes).toContain("skill.name.required");
-    expect(codes).toContain("skill.description.required");
     expect(codes).toContain("skill.diagnostics.truncated");
     expect(codes.filter((code) => code === "skill.resources.environment_file")).toHaveLength(1);
-    expect(codes.filter((code) => code === "skill.markdown.placeholder")).toHaveLength(252);
+    expect(codes.filter((code) => code === "skill.frontmatter.placeholder")).toHaveLength(2);
+    expect(codes.filter((code) => code === "skill.markdown.placeholder")).toHaveLength(251);
     expect(codes.filter((code) => code === "skill.reference.missing")).toHaveLength(0);
   });
 
@@ -679,6 +909,7 @@ describe("Agent Skill metadata validation", () => {
     );
     const graphPath = "../src/validate/markdown-resource-graph.js";
     const mapperPath = "../src/validate/markdown-resource-diagnostics.js";
+    const semanticPath = "../src/validate/semantic-text-placeholder.js";
     const genuineResource = Object.freeze([]);
     const genuinePlaceholder = Object.freeze([]);
     const resourceClone = Object.freeze([
@@ -692,6 +923,7 @@ describe("Agent Skill metadata validation", () => {
     let placeholderPredicateCalls = 0;
     let resourcePredicateMode: "normal" | "throw" | "truthy" = "normal";
     let placeholderPredicateMode: "normal" | "throw" | "truthy" = "normal";
+    const semanticCalls = [0, 0];
     const mapperCalls: string[] = [];
     let produced: object = {};
     vi.resetModules();
@@ -727,6 +959,21 @@ describe("Agent Skill metadata validation", () => {
         mapperCalls.push("graph");
       },
     }));
+    vi.doMock(semanticPath, async (importOriginal) => {
+      const actual =
+        await importOriginal<typeof import("../src/validate/semantic-text-placeholder.js")>();
+      return {
+        ...actual,
+        classifySemanticTextPlaceholder(value: unknown) {
+          semanticCalls[0] += 1;
+          return actual.classifySemanticTextPlaceholder(value);
+        },
+        isGenuineSemanticTextPlaceholderClassification(value: unknown) {
+          semanticCalls[1] += 1;
+          return actual.isGenuineSemanticTextPlaceholderClassification(value);
+        },
+      };
+    });
     try {
       const isolated = await import("../src/validate/agent-skill.js");
       const base = { ok: true, documentText: await readFile(fixture.path, "utf8") };
@@ -831,12 +1078,15 @@ describe("Agent Skill metadata validation", () => {
         expect(mapperCalls).toEqual([]);
       }
       placeholderPredicateMode = "normal";
+      expect(semanticCalls).toEqual([0, 0]);
       mapperCalls.length = 0;
       expect(await isolated.validateAgentSkill(fixture.directory)).toMatchObject({ ok: true });
       expect(mapperCalls).toEqual(["resource", "placeholder"]);
+      expect(semanticCalls).toEqual([1, 1]);
     } finally {
       vi.doUnmock(graphPath);
       vi.doUnmock(mapperPath);
+      vi.doUnmock(semanticPath);
       vi.resetModules();
     }
     expect(getterReads).toBe(0);

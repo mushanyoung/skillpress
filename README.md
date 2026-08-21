@@ -50,10 +50,12 @@ CommonMark links; local images and non-Markdown links are existence-checked, whi
 paths, and raw HTML are not followed. External URLs are not fetched, and fragment anchors are not
 validated. Within already-read Markdown bodies, validation also rejects placeholders found in
 analyzer-authorized visible text; code spans and blocks, raw HTML, link or image destinations,
-machine identifiers, and `SKILL.md` YAML frontmatter are excluded. Missing, unsafe, ambiguous,
-unreadable, or over-budget resources produce deterministic errors. An `ok: true` report may still
-contain portability or target-specific warnings; it is not a readiness score, an evaluation result,
-or a publication receipt.
+and machine identifiers are excluded. Strictly parsed, decoded `description` and `compatibility`
+string values are also checked as complete semantic fields; raw YAML syntax, field names, and
+`name`, `license`, `allowed-tools`, and `metadata` values remain excluded. Missing, unsafe,
+ambiguous, unreadable, or over-budget resources produce deterministic errors. An `ok: true` report
+may still contain portability or target-specific warnings; it is not a readiness score, an
+evaluation result, or a publication receipt.
 
 SkillPress distinguishes local readiness from Tessl's official Quality and Impact scores. It will
 only report the latter when current Tessl evidence exists, and the release profile defaults to a

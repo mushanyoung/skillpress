@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { types } from "node:util";
 
 import { isSafePathInput } from "../path-safety.js";
 import { DiagnosticCollector } from "./diagnostics.js";
@@ -18,6 +19,10 @@ import {
   addMarkdownResourcePlaceholderFindingDiagnostics,
 } from "./markdown-resource-diagnostics.js";
 import { validateSupplementalMetadata } from "./metadata-rules.js";
+import {
+  classifySemanticTextPlaceholder,
+  isGenuineSemanticTextPlaceholderClassification,
+} from "./semantic-text-placeholder.js";
 import { inspectAgentSkillDocument } from "./skill-document.js";
 import { inspectAgentSkillRoot } from "./skill-root.js";
 import type {
@@ -38,7 +43,43 @@ const inspectDocumentSnapshot = inspectAgentSkillDocument;
 const inspectRootSnapshot = inspectAgentSkillRoot;
 const genuineResourceFindingsSnapshot = isGenuineBundledResourceNameFindings;
 const genuinePlaceholderFindingsSnapshot = isGenuineMarkdownResourcePlaceholderFindings;
+const classifyPlaceholderSnapshot = classifySemanticTextPlaceholder;
+const genuineClassificationSnapshot = isGenuineSemanticTextPlaceholderClassification;
+const applySnapshot = Reflect.apply;
+const isProxySnapshot = types.isProxy;
 const objectGetOwnPropertyDescriptorSnapshot = Object.getOwnPropertyDescriptor;
+const ABSENT = Symbol("absent");
+const INVALID_FIELD = Symbol("invalid");
+
+function applyIntrinsic<T>(intrinsic: (...args: never[]) => unknown, args: unknown[]): T {
+  return applySnapshot(intrinsic, undefined, args) as T;
+}
+
+function isRecord(value: unknown): value is object {
+  if (typeof value !== "object" || value === null) return false;
+  try {
+    return applyIntrinsic<boolean>(isProxySnapshot, [value]) === false;
+  } catch {
+    return false;
+  }
+}
+
+function ownData(value: object, key: PropertyKey): unknown {
+  try {
+    const descriptor = applyIntrinsic<PropertyDescriptor | undefined>(
+      objectGetOwnPropertyDescriptorSnapshot,
+      [value, key],
+    );
+    if (descriptor === undefined) return ABSENT;
+    const data = applyIntrinsic<PropertyDescriptor | undefined>(
+      objectGetOwnPropertyDescriptorSnapshot,
+      [descriptor, "value"],
+    );
+    return data === undefined ? INVALID_FIELD : data.value;
+  } catch {
+    return INVALID_FIELD;
+  }
+}
 
 function error(
   diagnostics: DiagnosticCollector,
@@ -220,6 +261,67 @@ function ownFindingInventory<T>(
   }
 }
 
+function classifyFrontmatterSemanticText(value: string): "safe" | "placeholder" | "failure" {
+  let classification: unknown;
+  try {
+    classification = applyIntrinsic(classifyPlaceholderSnapshot, [value]);
+    if (applyIntrinsic(genuineClassificationSnapshot, [classification]) !== true) return "failure";
+  } catch {
+    return "failure";
+  }
+  if (!isRecord(classification)) return "failure";
+  const ok = ownData(classification, "ok");
+  const reason = ownData(classification, "reason");
+  if (ok === true && reason === ABSENT) return "safe";
+  return ok === false && reason === "placeholder" ? "placeholder" : "failure";
+}
+
+function scanFrontmatterPlaceholders(parsed: ParsedAgentSkillFrontmatter | undefined) {
+  const descriptionEntry = parsed?.fields.get("description");
+  const compatibilityEntry = parsed?.fields.get("compatibility");
+  const description =
+    descriptionEntry?.value.kind === "string"
+      ? ([descriptionEntry.value.value, descriptionEntry.location] as const)
+      : undefined;
+  const compatibility =
+    compatibilityEntry?.value.kind === "string"
+      ? ([compatibilityEntry.value.value, compatibilityEntry.location] as const)
+      : undefined;
+  let descriptionFinding: DiagnosticLocation | undefined;
+  let compatibilityFinding: DiagnosticLocation | undefined;
+  if (description !== undefined) {
+    const result = classifyFrontmatterSemanticText(description[0]);
+    if (result === "failure") {
+      return [description[1], undefined, undefined];
+    }
+    if (result === "placeholder") descriptionFinding = description[1];
+  }
+  if (compatibility !== undefined) {
+    const result = classifyFrontmatterSemanticText(compatibility[0]);
+    if (result === "failure") {
+      return [compatibility[1], undefined, undefined];
+    }
+    if (result === "placeholder") compatibilityFinding = compatibility[1];
+  }
+  return [undefined, descriptionFinding, compatibilityFinding];
+}
+
+function addFrontmatterPlaceholderDiagnostic(
+  diagnostics: DiagnosticCollector,
+  location: DiagnosticLocation,
+  failure = false,
+): void {
+  error(
+    diagnostics,
+    failure ? "skill.frontmatter.placeholder_analysis" : "skill.frontmatter.placeholder",
+    failure
+      ? "frontmatter semantic text could not be analyzed safely"
+      : "frontmatter semantic text must not contain placeholders",
+    location,
+    "skillpress",
+  );
+}
+
 /**
  * Validate one canonical Agent Skill without executing its instructions or fetching external URLs.
  * Throws TypeError only for malformed API arguments; skill findings are returned as diagnostics.
@@ -266,7 +368,16 @@ export async function validateAgentSkill(
     addMarkdownResourceGraphFailureDiagnostic(diagnostics, "inconsistent");
     return diagnostics.finish(metadata);
   }
+  const frontmatterPlaceholders = scanFrontmatterPlaceholders(parsed);
   addBundledResourceNameFindingDiagnostics(diagnostics, resourceFindings);
+  if (frontmatterPlaceholders[0] !== undefined) {
+    addFrontmatterPlaceholderDiagnostic(diagnostics, frontmatterPlaceholders[0], true);
+  } else {
+    if (frontmatterPlaceholders[1] !== undefined)
+      addFrontmatterPlaceholderDiagnostic(diagnostics, frontmatterPlaceholders[1]);
+    if (frontmatterPlaceholders[2] !== undefined)
+      addFrontmatterPlaceholderDiagnostic(diagnostics, frontmatterPlaceholders[2]);
+  }
   addMarkdownResourcePlaceholderFindingDiagnostics(diagnostics, placeholderFindings);
   const graph = ownGraph(graphed);
   if (graph !== undefined) addMarkdownResourceGraphFindingDiagnostics(diagnostics, graph);
