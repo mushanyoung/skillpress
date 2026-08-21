@@ -1,5 +1,4 @@
 import { Buffer } from "node:buffer";
-import { spawnSync } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import { types } from "node:util";
 
@@ -52,6 +51,7 @@ describe("hardened Markdown AST projection", () => {
         report.headings,
         report.definitions,
         report.unusedDefinitions,
+        report.placeholderFindings,
         report.issues,
       ]) {
         expect(Object.isFrozen(values)).toBe(true);
@@ -283,9 +283,18 @@ describe("hardened Markdown AST projection", () => {
 
     const aggregate = (delta: number) => {
       const values = Array.from({ length: 15 }, () => "x".repeat(MAX_SKILL_MARKDOWN_SOURCE_BYTES));
-      values[15] = "x".repeat(MAX_SKILL_MARKDOWN_SOURCE_BYTES - 139 + delta);
+      values[15] = "x".repeat(MAX_SKILL_MARKDOWN_SOURCE_BYTES - 143 + delta);
       return root([
-        { type: "heading", depth: 1, children: values.map((value) => ({ type: "text", value })) },
+        {
+          type: "code",
+          children: [
+            {
+              type: "heading",
+              depth: 1,
+              children: values.map((value) => ({ type: "text", value })),
+            },
+          ],
+        },
       ]);
     };
     const exact = analyzeTree(aggregate(0));
@@ -296,7 +305,18 @@ describe("hardened Markdown AST projection", () => {
     const shared = { type: "text", value: "x".repeat(300_000) };
     expect(
       issueCode(
-        root([{ type: "heading", depth: 1, children: Array.from({ length: 28 }, () => shared) }]),
+        root([
+          {
+            type: "code",
+            children: [
+              {
+                type: "heading",
+                depth: 1,
+                children: Array.from({ length: 28 }, () => shared),
+              },
+            ],
+          },
+        ]),
       ),
     ).toBe("skill.markdown.complexity");
     expect(MAX_SKILL_MARKDOWN_AST_SCALAR_CODE_UNITS).toBe(8 * 1024 * 1024);
@@ -450,18 +470,43 @@ describe("hardened Markdown AST projection", () => {
   });
 
   it("keeps dense-slot descriptors independent of inherited get and set", () => {
-    const moduleUrl = new URL("../src/validate/markdown-analysis.ts", import.meta.url).href;
-    const script = `const m=await import(${JSON.stringify(moduleUrl)});let calls=0;const trap=()=>{calls+=1;return undefined};const g=Object.getOwnPropertyDescriptor(Object.prototype,'get');const s=Object.getOwnPropertyDescriptor(Object.prototype,'set');let summary;try{Object.defineProperty(Object.prototype,'get',{__proto__:null,configurable:true,get:trap,set:trap});Object.defineProperty(Object.prototype,'set',{__proto__:null,configurable:true,get:trap,set:trap});const ok=m.analyzeMarkdown('safe',()=>({type:'root',children:[{type:'heading',depth:1,children:[{type:'text',value:'ok'}]}]}));const bad=m.analyzeMarkdown('safe',()=>({type:'root',children:[{type:'x'.repeat(524289)}]}));summary={calls,heading:ok.headings[0]?.text,bad:bad.issues[0]?.code}}finally{g===undefined?Reflect.deleteProperty(Object.prototype,'get'):Object.defineProperty(Object.prototype,'get',g);s===undefined?Reflect.deleteProperty(Object.prototype,'set'):Object.defineProperty(Object.prototype,'set',s)}process.stdout.write(JSON.stringify(summary));`;
-    const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
-      encoding: "utf8",
-      timeout: 10_000,
-    });
-    expect(child.status, child.stderr).toBe(0);
-    expect(JSON.parse(child.stdout)).toEqual({
-      calls: 0,
-      heading: "ok",
-      bad: "skill.markdown.complexity",
-    });
+    const getter = getOwnPropertyDescriptorSnapshot(Object.prototype, "get");
+    const setter = getOwnPropertyDescriptorSnapshot(Object.prototype, "set");
+    const safeTree = root([
+      { type: "heading", depth: 1, children: [{ type: "text", value: "ok" }] },
+    ]);
+    const badTree = root([{ type: "x".repeat(524_289) }]);
+    let calls = 0;
+    const trap = () => {
+      calls += 1;
+      return undefined;
+    };
+    let ok: ReturnType<typeof analyzeMarkdown> | undefined;
+    let bad: ReturnType<typeof analyzeMarkdown> | undefined;
+    try {
+      definePropertySnapshot(Object.prototype, "get", {
+        __proto__: null,
+        configurable: true,
+        get: trap,
+        set: trap,
+      });
+      definePropertySnapshot(Object.prototype, "set", {
+        __proto__: null,
+        configurable: true,
+        get: trap,
+        set: trap,
+      });
+      ok = analyzeMarkdown("safe", () => safeTree);
+      bad = analyzeMarkdown("safe", () => badTree);
+    } finally {
+      if (getter === undefined) Reflect.deleteProperty(Object.prototype, "get");
+      else definePropertySnapshot(Object.prototype, "get", getter);
+      if (setter === undefined) Reflect.deleteProperty(Object.prototype, "set");
+      else definePropertySnapshot(Object.prototype, "set", setter);
+    }
+    expect(calls).toBe(0);
+    expect(ok?.headings[0]?.text).toBe("ok");
+    expect(bad?.issues[0]?.code).toBe("skill.markdown.complexity");
   });
 
   it("extracts only the three CommonMark resources from the property-tax fixture shape", () => {

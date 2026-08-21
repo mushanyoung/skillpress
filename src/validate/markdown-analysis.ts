@@ -4,6 +4,12 @@ import { types } from "node:util";
 import type { Root } from "mdast";
 import { fromMarkdown } from "mdast-util-from-markdown";
 
+import {
+  classifySemanticTextPlaceholder,
+  isGenuineSemanticTextPlaceholderClassification,
+  MAX_SEMANTIC_TEXT_CODE_UNITS,
+} from "./semantic-text-placeholder.js";
+
 export const MAX_SKILL_MARKDOWN_AST_NODES = 20_000;
 export const MAX_SKILL_MARKDOWN_AST_SCALAR_CODE_UNITS = 8 * 1024 * 1024;
 export const MAX_SKILL_MARKDOWN_DEFINITIONS_PER_FILE = 1_024;
@@ -14,6 +20,9 @@ const MDAST_NODE_TYPES =
   "|root|blockquote|break|code|definition|delete|emphasis|footnoteDefinition|footnoteReference|heading|html|image|imageReference|inlineCode|link|linkReference|list|listItem|paragraph|strong|table|tableCell|tableRow|text|thematicBreak|yaml|";
 const MDAST_CONTAINER_TYPES =
   "|root|blockquote|delete|emphasis|footnoteDefinition|heading|link|linkReference|list|listItem|paragraph|strong|table|tableCell|tableRow|";
+const SEMANTIC_BLOCK_TYPES = "|heading|paragraph|tableCell|";
+const SEMANTIC_OUTER_TYPES = "|root|blockquote|footnoteDefinition|list|listItem|table|tableRow|";
+const SEMANTIC_TRANSPARENT_TYPES = "|delete|emphasis|link|linkReference|strong|";
 
 export interface MarkdownLocation {
   readonly line: number;
@@ -33,6 +42,10 @@ export interface MarkdownTarget {
 export interface MarkdownHeading {
   readonly depth: 1 | 2 | 3 | 4 | 5 | 6;
   readonly text: string;
+  readonly location: MarkdownLocation;
+}
+
+export interface MarkdownPlaceholderFinding {
   readonly location: MarkdownLocation;
 }
 
@@ -61,6 +74,7 @@ export interface MarkdownAnalysis {
   readonly headings: readonly MarkdownHeading[];
   readonly definitions: readonly MarkdownDefinition[];
   readonly unusedDefinitions: readonly MarkdownDefinition[];
+  readonly placeholderFindings: readonly MarkdownPlaceholderFinding[];
   readonly issues: readonly MarkdownAnalysisIssue[];
 }
 
@@ -93,7 +107,8 @@ type NodeType =
   | "thematicBreak"
   | "yaml";
 type ReferenceType = "collapsed" | "full" | "shortcut";
-type FailureKind = "parse" | "node_complexity" | "scalar_complexity";
+type FailureKind = "parse" | "node_complexity" | "scalar_complexity" | "semantic_complexity";
+type ProjectionCounter = "main" | "main_semantic" | "heading" | "semantic" | "heading_semantic";
 type ProjectionFailure = Readonly<{
   kind: FailureKind;
   location: MarkdownLocation | undefined;
@@ -103,6 +118,7 @@ interface AnalysisBudget {
   scalarCodeUnits: number;
   scheduledNodeOccurrences: number;
   headingProjectedOccurrences: number;
+  semanticProjectedOccurrences: number;
 }
 
 interface ProjectedNode {
@@ -125,7 +141,11 @@ interface PendingTarget {
 }
 
 type NodeProjectionResult = ProjectedNode | ProjectionFailure;
-type HeadingProjectionResult = string | ProjectionFailure;
+interface VisibleTextProjection {
+  readonly display: string | undefined;
+  readonly semantic: string | undefined;
+}
+type VisibleTextProjectionResult = VisibleTextProjection | ProjectionFailure;
 
 // Module initialization is the trust boundary for the projection intrinsics below.
 const defaultParserSnapshot = fromMarkdown;
@@ -158,6 +178,8 @@ const weakSetHasSnapshot = WeakSet.prototype.has;
 const charCodeAtSnapshot = String.prototype.charCodeAt;
 const indexOfSnapshot = String.prototype.indexOf;
 const isProxySnapshot = types.isProxy;
+const classifyPlaceholderSnapshot = classifySemanticTextPlaceholder;
+const genuinePlaceholderSnapshot = isGenuineSemanticTextPlaceholderClassification;
 const analysisBrands = new weakSetConstructorSnapshot<object>();
 
 type Intrinsic = (...args: never[]) => unknown;
@@ -193,6 +215,7 @@ const INVALID_FIELD = freeze({ kind: "invalid" } as const);
 const PARSE_FAILURE = freeze({ kind: "parse", location: undefined } as const);
 const NODE_COMPLEXITY = freeze({ kind: "node_complexity", location: undefined } as const);
 const SCALAR_COMPLEXITY = freeze({ kind: "scalar_complexity", location: undefined } as const);
+const SEMANTIC_COMPLEXITY = freeze({ kind: "semantic_complexity", location: undefined } as const);
 type FieldFailure = typeof INVALID_FIELD | typeof SCALAR_COMPLEXITY;
 
 function ownData(value: object, key: PropertyKey): unknown | typeof ABSENT | typeof INVALID_FIELD {
@@ -360,18 +383,36 @@ function locationOf(
     : undefined;
 }
 
+function reserveProjectedOccurrences(
+  length: number,
+  budget: AnalysisBudget,
+  counter: ProjectionCounter,
+): boolean {
+  const countsMain = counter === "main" || counter === "main_semantic";
+  const countsHeading = counter === "heading" || counter === "heading_semantic";
+  const countsSemantic =
+    counter === "semantic" || counter === "heading_semantic" || counter === "main_semantic";
+  if (
+    (countsMain && length > MAX_SKILL_MARKDOWN_AST_NODES - budget.scheduledNodeOccurrences) ||
+    (countsHeading && length > MAX_SKILL_MARKDOWN_AST_NODES - budget.headingProjectedOccurrences) ||
+    (countsSemantic && length > MAX_SKILL_MARKDOWN_AST_NODES - budget.semanticProjectedOccurrences)
+  ) {
+    return false;
+  }
+  if (countsMain) budget.scheduledNodeOccurrences += length;
+  if (countsHeading) budget.headingProjectedOccurrences += length;
+  if (countsSemantic) budget.semanticProjectedOccurrences += length;
+  return true;
+}
+
 function copyChildren(
   value: unknown,
   budget: AnalysisBudget,
-  counter: "main" | "heading",
+  counter: ProjectionCounter,
 ): unknown[] | ProjectionFailure {
   const length = arrayLength(value);
   if (typeof length !== "number") return PARSE_FAILURE;
-  const current =
-    counter === "main" ? budget.scheduledNodeOccurrences : budget.headingProjectedOccurrences;
-  if (length > MAX_SKILL_MARKDOWN_AST_NODES - current) return NODE_COMPLEXITY;
-  if (counter === "main") budget.scheduledNodeOccurrences += length;
-  else budget.headingProjectedOccurrences += length;
+  if (!reserveProjectedOccurrences(length, budget, counter)) return NODE_COMPLEXITY;
   const copy = new arrayConstructorSnapshot<unknown>();
   for (let index = 0; index < length; index += 1) {
     const child = ownData(value as object, index);
@@ -387,7 +428,7 @@ function childrenOf(
   value: Record<PropertyKey, unknown>,
   type: NodeType,
   budget: AnalysisBudget,
-  counter: "main" | "heading",
+  counter: ProjectionCounter,
 ): unknown[] | typeof ABSENT | ProjectionFailure {
   const children = ownData(value, "children");
   if (children === ABSENT) return isContainerType(type) ? PARSE_FAILURE : ABSENT;
@@ -399,18 +440,23 @@ function withLocation(
   failure: ProjectionFailure | FieldFailure,
   location: MarkdownLocation,
 ): ProjectionFailure {
-  if (failure.kind === "node_complexity") return freeze({ kind: failure.kind, location });
-  if (failure.kind === "scalar_complexity") return freeze({ kind: failure.kind, location });
-  return PARSE_FAILURE;
+  return failure.kind === "invalid" || failure.kind === "parse"
+    ? PARSE_FAILURE
+    : freeze({ kind: failure.kind, location });
 }
 
 function normalizeFieldFailure(failure: FieldFailure): ProjectionFailure {
   return failure.kind === "scalar_complexity" ? SCALAR_COMPLEXITY : PARSE_FAILURE;
 }
 
-function isProjectionFailure(value: ProjectedNode | ProjectionFailure): value is ProjectionFailure {
+function isProjectionFailure(value: object): value is ProjectionFailure {
   const kind = ownData(value, "kind");
-  return kind === "parse" || kind === "node_complexity" || kind === "scalar_complexity";
+  return (
+    kind === "parse" ||
+    kind === "node_complexity" ||
+    kind === "scalar_complexity" ||
+    kind === "semantic_complexity"
+  );
 }
 
 function readMainFields(
@@ -450,6 +496,7 @@ function projectNode(
   value: unknown,
   budget: AnalysisBudget,
   initial: boolean,
+  semanticReachable: boolean,
   maxCoordinate: number,
 ): NodeProjectionResult {
   if (!isCurrentPlainRecord(value)) return PARSE_FAILURE;
@@ -471,7 +518,12 @@ function projectNode(
   };
   const fieldFailure = readMainFields(value, node, budget);
   if (fieldFailure !== undefined) return fieldFailure;
-  const children = childrenOf(value, type, budget, "main");
+  const children = childrenOf(
+    value,
+    type,
+    budget,
+    semanticReachable && listed(SEMANTIC_BLOCK_TYPES, type) ? "main_semantic" : "main",
+  );
   if (children === PARSE_FAILURE || children === NODE_COMPLEXITY) {
     return withLocation(children, location);
   }
@@ -479,61 +531,166 @@ function projectNode(
   return node;
 }
 
-function headingAlt(
+function projectImageAlt(
   value: Record<PropertyKey, unknown>,
   budget: AnalysisBudget,
+  semantic: boolean,
+  location: MarkdownLocation,
 ): string | ProjectionFailure {
   const alt = ownData(value, "alt");
   if (alt === ABSENT || alt === undefined || alt === null) return "";
   if (alt === INVALID_FIELD) return PARSE_FAILURE;
+  if (semantic && typeof alt === "string" && alt.length > MAX_SEMANTIC_TEXT_CODE_UNITS) {
+    return withLocation(SEMANTIC_COMPLEXITY, location);
+  }
   const projected = scalar(alt, budget);
   return typeof projected === "string" ? projected : normalizeFieldFailure(projected);
 }
 
-function projectHeadingText(
+function projectText(
+  value: Record<PropertyKey, unknown>,
+  budget: AnalysisBudget,
+  semantic: boolean,
+  location: MarkdownLocation,
+): string | ProjectionFailure {
+  const raw = ownData(value, "value");
+  if (semantic && typeof raw === "string" && raw.length > MAX_SEMANTIC_TEXT_CODE_UNITS) {
+    return withLocation(SEMANTIC_COMPLEXITY, location);
+  }
+  if (raw === ABSENT || raw === INVALID_FIELD) return PARSE_FAILURE;
+  const projected = scalar(raw, budget);
+  return typeof projected === "string" ? projected : normalizeFieldFailure(projected);
+}
+
+interface MutableVisibleTextProjection {
+  readonly displayFragments: string[];
+  readonly semanticFragments: string[];
+  semanticCodeUnits: number;
+  hasSemanticPayload: boolean;
+}
+
+function appendSemanticFragment(
+  state: MutableVisibleTextProjection,
+  fragment: string,
+  payload: boolean,
+  location: MarkdownLocation,
+): ProjectionFailure | undefined {
+  if (fragment.length > MAX_SEMANTIC_TEXT_CODE_UNITS - state.semanticCodeUnits) {
+    return withLocation(SEMANTIC_COMPLEXITY, location);
+  }
+  if (fragment.length > 0) append(state.semanticFragments, fragment);
+  state.semanticCodeUnits += fragment.length;
+  if (payload && fragment.length > 0) state.hasSemanticPayload = true;
+  return undefined;
+}
+
+const DISPLAY_TEXT = 1;
+const SEMANTIC_TEXT = 2;
+
+function projectVisibleText(
   initialChildren: readonly unknown[],
   budget: AnalysisBudget,
-): HeadingProjectionResult {
-  if (initialChildren.length > MAX_SKILL_MARKDOWN_AST_NODES - budget.headingProjectedOccurrences) {
+  location: MarkdownLocation,
+  includeDisplay: boolean,
+  includeSemantic: boolean,
+): VisibleTextProjectionResult {
+  if (includeDisplay && !reserveProjectedOccurrences(initialChildren.length, budget, "heading")) {
     return NODE_COMPLEXITY;
   }
-  budget.headingProjectedOccurrences += initialChildren.length;
   const stack = new arrayConstructorSnapshot<unknown>();
+  const modes = new arrayConstructorSnapshot<number>();
   let stackLength = 0;
+  const initialMode = (includeSemantic ? SEMANTIC_TEXT : 0) | (includeDisplay ? DISPLAY_TEXT : 0);
   for (let index = initialChildren.length - 1; index >= 0; index -= 1) {
     defineSlot(stack, stackLength, initialChildren[index]);
+    defineSlot(modes, stackLength, initialMode);
     stackLength += 1;
   }
-  const fragments = new arrayConstructorSnapshot<string>();
+  const state: MutableVisibleTextProjection = {
+    displayFragments: new arrayConstructorSnapshot<string>(),
+    semanticFragments: new arrayConstructorSnapshot<string>(),
+    semanticCodeUnits: 0,
+    hasSemanticPayload: false,
+  };
   while (stackLength > 0) {
     stackLength -= 1;
     const value = stack[stackLength];
+    const mode = modes[stackLength] as number;
+    const display = (mode & DISPLAY_TEXT) !== 0;
+    const semantic = (mode & SEMANTIC_TEXT) !== 0;
     if (!isCurrentPlainRecord(value)) return PARSE_FAILURE;
     const type = scalarField(value, "type", budget);
     if (typeof type !== "string") return normalizeFieldFailure(type);
     if (!isNodeType(type) || type === "root") {
       return PARSE_FAILURE;
     }
-    if (type === "text" || type === "inlineCode") {
-      const text = scalarField(value, "value", budget);
-      if (typeof text !== "string") return normalizeFieldFailure(text);
-      append(fragments, text);
-    } else if (type === "image" || type === "imageReference") {
-      const alt = headingAlt(value, budget);
-      if (typeof alt !== "string") return alt;
-      append(fragments, alt);
-    } else if (type === "break") append(fragments, " ");
-    if (
-      type === "text" ||
-      type === "inlineCode" ||
-      type === "image" ||
-      type === "imageReference" ||
-      type === "html" ||
-      type === "break"
-    ) {
+    if (type === "text") {
+      const text = projectText(value, budget, semantic, location);
+      if (typeof text !== "string") return text;
+      if (display) append(state.displayFragments, text);
+      if (semantic) {
+        const failure = appendSemanticFragment(state, text, true, location);
+        if (failure !== undefined) return failure;
+      }
       continue;
     }
-    const children = childrenOf(value, type, budget, "heading");
+    if (type === "inlineCode") {
+      if (display) {
+        const text = scalarField(value, "value", budget);
+        if (typeof text !== "string") return normalizeFieldFailure(text);
+        append(state.displayFragments, text);
+      }
+      if (semantic) {
+        const failure = appendSemanticFragment(state, " ", false, location);
+        if (failure !== undefined) return failure;
+      }
+      continue;
+    } else if (type === "image" || type === "imageReference") {
+      const alt = projectImageAlt(value, budget, semantic, location);
+      if (typeof alt !== "string") return alt;
+      if (display) append(state.displayFragments, alt);
+      if (semantic) {
+        const failure = appendSemanticFragment(
+          state,
+          alt.length > 0 ? alt : " ",
+          alt.length > 0,
+          location,
+        );
+        if (failure !== undefined) return failure;
+      }
+      continue;
+    }
+    if (type === "break") {
+      if (display) append(state.displayFragments, " ");
+      if (semantic) {
+        const failure = appendSemanticFragment(state, "\n", false, location);
+        if (failure !== undefined) return failure;
+      }
+      continue;
+    }
+    if (type === "html") {
+      if (semantic) {
+        const failure = appendSemanticFragment(state, " ", false, location);
+        if (failure !== undefined) return failure;
+      }
+      continue;
+    }
+    let childMode = display ? DISPLAY_TEXT : 0;
+    if (semantic) {
+      if (listed(SEMANTIC_TRANSPARENT_TYPES, type)) childMode |= SEMANTIC_TEXT;
+      else {
+        const failure = appendSemanticFragment(state, " ", false, location);
+        if (failure !== undefined) return failure;
+      }
+    }
+    if (childMode === 0) continue;
+    const counter: ProjectionCounter =
+      childMode === (DISPLAY_TEXT | SEMANTIC_TEXT)
+        ? "heading_semantic"
+        : childMode === DISPLAY_TEXT
+          ? "heading"
+          : "semantic";
+    const children = childrenOf(value, type, budget, counter);
     if (children === PARSE_FAILURE || children === NODE_COMPLEXITY) {
       return children;
     }
@@ -541,11 +698,46 @@ function projectHeadingText(
       const nested = children as unknown[];
       for (let index = nested.length - 1; index >= 0; index -= 1) {
         defineSlot(stack, stackLength, nested[index]);
+        defineSlot(modes, stackLength, childMode);
         stackLength += 1;
       }
     }
   }
-  return applyIntrinsic<string>(arrayJoinSnapshot, fragments, [""]);
+  return {
+    display: includeDisplay
+      ? applyIntrinsic<string>(arrayJoinSnapshot, state.displayFragments, [""])
+      : undefined,
+    semantic: state.hasSemanticPayload
+      ? applyIntrinsic<string>(arrayJoinSnapshot, state.semanticFragments, [""])
+      : undefined,
+  };
+}
+
+function classifyProjectedSemanticText(
+  text: string,
+  location: MarkdownLocation,
+  findings: MarkdownPlaceholderFinding[],
+): ProjectionFailure | undefined {
+  let classification: unknown;
+  let genuine: unknown;
+  try {
+    classification = applyIntrinsic(classifyPlaceholderSnapshot as Intrinsic, undefined, [text]);
+    genuine = applyIntrinsic(genuinePlaceholderSnapshot as Intrinsic, undefined, [classification]);
+  } catch {
+    return PARSE_FAILURE;
+  }
+  if (genuine !== true || classification === null || typeof classification !== "object") {
+    return PARSE_FAILURE;
+  }
+  const ok = ownData(classification, "ok");
+  const reason = ownData(classification, "reason");
+  if (ok === true && reason === ABSENT) return undefined;
+  if (ok !== false) return PARSE_FAILURE;
+  if (reason === "placeholder") {
+    append(findings, freeze({ location }));
+    return undefined;
+  }
+  return reason === "too_large" ? withLocation(SEMANTIC_COMPLEXITY, location) : PARSE_FAILURE;
 }
 
 function issue(
@@ -562,6 +754,7 @@ function registerResult(
   headings: readonly MarkdownHeading[],
   definitions: readonly MarkdownDefinition[],
   unusedDefinitions: readonly MarkdownDefinition[],
+  placeholderFindings: readonly MarkdownPlaceholderFinding[],
   issues: readonly MarkdownAnalysisIssue[],
   countSourceLines = true,
   nodeCount = 0,
@@ -573,6 +766,7 @@ function registerResult(
     headings: frozenCopy(headings),
     definitions: frozenCopy(definitions),
     unusedDefinitions: frozenCopy(unusedDefinitions),
+    placeholderFindings: frozenCopy(placeholderFindings),
     issues: frozenCopy(issues),
   });
   applyIntrinsic(weakSetAddSnapshot, analysisBrands, [analysis]);
@@ -586,12 +780,29 @@ function failureResult(
   location?: MarkdownLocation,
   countSourceLines = true,
 ): MarkdownAnalysis {
-  return registerResult(source, [], [], [], [], [issue(code, message, location)], countSourceLines);
+  return registerResult(
+    source,
+    [],
+    [],
+    [],
+    [],
+    [],
+    [issue(code, message, location)],
+    countSourceLines,
+  );
 }
 
 function projectionFailureResult(source: string, failure: ProjectionFailure): MarkdownAnalysis {
   if (failure.kind === "parse") {
     return failureResult(source, "skill.markdown.parse", "Markdown could not be parsed safely");
+  }
+  if (failure.kind === "semantic_complexity") {
+    return failureResult(
+      source,
+      "skill.markdown.complexity",
+      `Markdown semantic text exceeds ${MAX_SEMANTIC_TEXT_CODE_UNITS} UTF-16 code units`,
+      failure.location,
+    );
   }
   return failureResult(
     source,
@@ -652,20 +863,31 @@ export function analyzeMarkdown(
       scalarCodeUnits: 0,
       scheduledNodeOccurrences: 1,
       headingProjectedOccurrences: 0,
+      semanticProjectedOccurrences: 0,
     };
     const definitions = new mapConstructorSnapshot<string, MarkdownDefinition>();
     const definitionList = new arrayConstructorSnapshot<MarkdownDefinition>();
     const duplicateIssues = new arrayConstructorSnapshot<MarkdownAnalysisIssue>();
     const pendingTargets = new arrayConstructorSnapshot<PendingTarget>();
     const headings = new arrayConstructorSnapshot<MarkdownHeading>();
+    const placeholderFindings = new arrayConstructorSnapshot<MarkdownPlaceholderFinding>();
     const stack = new arrayConstructorSnapshot<unknown>();
+    const semanticReachability = new arrayConstructorSnapshot<boolean>();
     defineSlot(stack, 0, root);
+    defineSlot(semanticReachability, 0, true);
     let stackLength = 1;
     let nodes = 0;
     let definitionNodes = 0;
     while (stackLength > 0) {
       stackLength -= 1;
-      const projected = projectNode(stack[stackLength], budget, nodes === 0, source.length + 1);
+      const semanticReachable = semanticReachability[stackLength] === true;
+      const projected = projectNode(
+        stack[stackLength],
+        budget,
+        nodes === 0,
+        semanticReachable,
+        source.length + 1,
+      );
       if (isProjectionFailure(projected)) return projectionFailureResult(source, projected);
       const node = projected;
       nodes += 1;
@@ -718,19 +940,39 @@ export function analyzeMarkdown(
             location: node.location,
           }),
         );
-      } else if (node.type === "heading") {
-        const projectedText = projectHeadingText(node.children as unknown[], budget);
-        if (typeof projectedText !== "string") {
+      } else if (
+        node.type === "heading" ||
+        (semanticReachable && (node.type === "paragraph" || node.type === "tableCell"))
+      ) {
+        const heading = node.type === "heading";
+        const projectedText = projectVisibleText(
+          node.children as unknown[],
+          budget,
+          node.location,
+          heading,
+          semanticReachable,
+        );
+        if (isProjectionFailure(projectedText)) {
           return projectionFailureResult(source, withLocation(projectedText, node.location));
         }
-        append(
-          headings,
-          freeze({
-            depth: node.depth as 1 | 2 | 3 | 4 | 5 | 6,
-            text: projectedText,
-            location: node.location,
-          }),
-        );
+        if (heading) {
+          append(
+            headings,
+            freeze({
+              depth: node.depth as 1 | 2 | 3 | 4 | 5 | 6,
+              text: projectedText.display as string,
+              location: node.location,
+            }),
+          );
+        }
+        if (projectedText.semantic !== undefined) {
+          const failure = classifyProjectedSemanticText(
+            projectedText.semantic,
+            node.location,
+            placeholderFindings,
+          );
+          if (failure !== undefined) return projectionFailureResult(source, failure);
+        }
       }
       if (pendingTargets.length > MAX_SKILL_MARKDOWN_TARGETS_PER_FILE) {
         return failureResult(
@@ -742,8 +984,10 @@ export function analyzeMarkdown(
       }
       const children = node.children;
       if (children !== undefined) {
+        const childSemanticReachable = semanticReachable && listed(SEMANTIC_OUTER_TYPES, node.type);
         for (let index = children.length - 1; index >= 0; index -= 1) {
           defineSlot(stack, stackLength, children[index]);
+          defineSlot(semanticReachability, stackLength, childSemanticReachable);
           stackLength += 1;
         }
       }
@@ -797,6 +1041,7 @@ export function analyzeMarkdown(
       headings,
       definitionList,
       unusedDefinitions,
+      placeholderFindings,
       duplicateIssues,
       true,
       nodes,
