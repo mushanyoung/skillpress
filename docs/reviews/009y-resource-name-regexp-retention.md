@@ -56,9 +56,9 @@ expression without entering the retention oracle.
 
 For representatives covering every matcher control-flow branch, the retention oracle statically
 imports the module, seeds a benign nine-group match, snapshots all 19 legacy observations,
-classifies the secret-bearing name, and immediately snapshots again. No expression or assertion
-runs inside the before/classify/after window. Results are the same frozen, genuine colon-derived
-`nonportable` singleton and contain no secret. Post-import replacements of both
+classifies the secret-bearing name, and immediately snapshots again. No RegExp execution or
+assertion runs inside the before/classify/after window. Results are the same frozen, genuine
+colon-derived `nonportable` singleton and contain no secret. Post-import replacements of both
 `RegExp.prototype.exec` and `.test` are ignored, and a source audit locks zero `RegExp`, `.exec`, or
 `.test` use in `resource-name-profile.ts`.
 
@@ -124,9 +124,10 @@ graph on every version. The stable graph-summary SHA-256 is
 
 ## Harness record
 
-One review command initially used the wrong detached-checkout working directory and exited 128; it
-was rerun from the correct candidate directory. An audit agent reached the collaboration spawn
-limit; that was orchestration state, not a product or release-harness failure. Neither incident
-changed a result. Apart from this authorized later docs-only record, the review, audit, and detached
-release harnesses performed no npm command or write in the shared checkout. The shared candidate
-and property repository finished clean.
+One parallel review step cloned both endpoints successfully but ran both checkout subprocesses from
+the private root. Both exited 128 and were rerun from their respective base and candidate
+directories. An audit agent reached the collaboration spawn limit; that was orchestration state,
+not a product or release-harness failure. Neither incident changed a result. Apart from this
+authorized later docs-only record, the review, audit, and detached release harnesses performed no
+npm command or write in the shared checkout. The shared candidate and property repository finished
+clean.
